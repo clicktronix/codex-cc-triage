@@ -1,0 +1,20 @@
+{
+  "name": "codex-cc-tuner",
+  "interface": {
+    "displayName": "Codex CC Tuner"
+  },
+  "plugins": [
+    {
+      "name": "codex-cc-tuner",
+      "source": {
+        "source": "local",
+        "path": "./plugins/codex-cc-tuner"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

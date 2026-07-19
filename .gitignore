@@ -1,0 +1,6 @@
+.DS_Store
+*.log
+*.py[cod]
+.ruff_cache/
+__pycache__/
+.codex/claude-threads/

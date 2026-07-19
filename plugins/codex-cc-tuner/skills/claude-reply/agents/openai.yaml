@@ -1,0 +1,7 @@
+interface:
+  display_name: "Claude Reply"
+  short_description: "Continue an existing Claude second-opinion thread"
+  default_prompt: "Use $claude-reply to continue this Claude thread."
+
+policy:
+  allow_implicit_invocation: false

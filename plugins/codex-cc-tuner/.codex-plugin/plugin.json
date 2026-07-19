@@ -1,0 +1,36 @@
+{
+  "name": "codex-cc-tuner",
+  "version": "0.1.0",
+  "description": "Ask Claude Code for persistent, read-only planning and code-review second opinions from Codex.",
+  "author": {
+    "name": "Clicktronix",
+    "url": "https://github.com/clicktronix"
+  },
+  "homepage": "https://github.com/clicktronix/codex-cc-tuner",
+  "repository": "https://github.com/clicktronix/codex-cc-tuner",
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "code-review",
+    "planning",
+    "second-opinion",
+    "cross-agent"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Codex CC Tuner",
+    "shortDescription": "Get persistent Claude Code second opinions.",
+    "longDescription": "Use task-scoped Claude Code sessions from Codex to stress-test plans, review branch diffs, and re-evaluate fixes without granting the child agent write access.",
+    "developerName": "Clicktronix",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Read"
+    ],
+    "websiteURL": "https://github.com/clicktronix/codex-cc-tuner",
+    "defaultPrompt": [
+      "Ask Claude Code to review my current branch",
+      "Stress-test this implementation plan with Claude Code"
+    ]
+  }
+}

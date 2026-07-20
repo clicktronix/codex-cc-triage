@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Persistent, read-only Claude Code bridge for Codex.
 set -u
+umask 077
 
-SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
 SNAPSHOT="$SCRIPT_DIR/repo_snapshot.py"
 PARSER="$SCRIPT_DIR/parse_claude_json.py"
-STATE_REL=".codex/claude-threads"
+STATE_REL=".agent-state/codex-cc-tuner"
 ROOT="${CODEX_CC_TUNER_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || true)}"
 CLAUDE_BIN="${CODEX_CC_TUNER_CLAUDE_BIN:-claude}"
 MODEL="${CODEX_CC_TUNER_MODEL:-sonnet}"
@@ -27,25 +28,55 @@ die() {
 [ -n "$ROOT" ] || die 7 "run this skill inside a Git repository"
 cd "$ROOT" 2>/dev/null || die 7 "cannot enter repository root '$ROOT'"
 git rev-parse --show-toplevel >/dev/null 2>&1 || die 7 "not a Git repository: '$ROOT'"
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || die 7 "cannot resolve repository root"
+cd "$ROOT" 2>/dev/null || die 7 "cannot enter repository root '$ROOT'"
+ROOT="$(pwd -P)" || die 7 "cannot canonicalize repository root"
 
 STATE_DIR="$ROOT/$STATE_REL"
 
-ensure_local_exclude() {
-  local exclude_file pattern
-  if git check-ignore -q "$STATE_REL/probe" 2>/dev/null; then
-    return
-  fi
+prepare_state_dir() {
+  local parent="$ROOT/.agent-state"
+  local ignore_file="$STATE_DIR/.gitignore"
+  local resolved tracked temporary
 
-  exclude_file="$(git rev-parse --git-path info/exclude 2>/dev/null)"
-  [ -n "$exclude_file" ] || die 7 "cannot resolve Git exclude file"
-  mkdir -p "$(dirname "$exclude_file")" || die 7 "cannot create Git exclude directory"
-  pattern="/$STATE_REL/"
-  if ! grep -qxF "$pattern" "$exclude_file" 2>/dev/null; then
-    if [ -s "$exclude_file" ] && [ -n "$(tail -c1 "$exclude_file" 2>/dev/null)" ]; then
-      printf '\n' >> "$exclude_file" || die 7 "cannot update '$exclude_file'"
-    fi
-    printf '%s\n' "$pattern" >> "$exclude_file" || die 7 "cannot update '$exclude_file'"
+  [ ! -L "$parent" ] || die 7 "refusing symlinked state parent: $parent"
+  [ ! -e "$parent" ] || [ -d "$parent" ] || die 7 "state parent is not a directory: $parent"
+  mkdir -p "$parent" || die 7 "cannot create state parent '$parent'"
+
+  [ ! -L "$STATE_DIR" ] || die 7 "refusing symlinked state directory: $STATE_DIR"
+  [ ! -e "$STATE_DIR" ] || [ -d "$STATE_DIR" ] || die 7 "state path is not a directory: $STATE_DIR"
+  mkdir -p "$STATE_DIR" || die 7 "cannot create state directory '$STATE_DIR'"
+
+  resolved="$(CDPATH='' cd -- "$STATE_DIR" 2>/dev/null && pwd -P)" \
+    || die 7 "cannot canonicalize state directory"
+  case "$resolved" in
+    "$ROOT"/*) ;;
+    *) die 7 "state directory escapes repository: $resolved" ;;
+  esac
+
+  tracked="$(git ls-files -- "$STATE_REL" 2>/dev/null)" \
+    || die 7 "cannot inspect tracked state paths"
+  [ -z "$tracked" ] || die 7 "refusing tracked state directory: $STATE_REL"
+  [ ! -L "$ignore_file" ] || die 7 "refusing symlinked state ignore file"
+  [ ! -e "$ignore_file" ] || [ -f "$ignore_file" ] \
+    || die 7 "state ignore path is not a regular file"
+  if ! grep -qxF '*' "$ignore_file" 2>/dev/null; then
+    temporary="$ignore_file.tmp.$$"
+    printf '*\n' > "$temporary" || die 7 "cannot write state ignore file"
+    mv "$temporary" "$ignore_file" || die 7 "cannot install state ignore file"
   fi
+  git check-ignore -q "$STATE_REL/probe" 2>/dev/null \
+    || die 7 "state directory is not ignored: $STATE_REL"
+}
+
+assert_thread_files_safe() {
+  local thread="$1"
+  local suffix path
+  for suffix in id mode base log context.md last-error.json last-error.stderr last-stderr; do
+    path="$STATE_DIR/$thread.$suffix"
+    [ ! -L "$path" ] || die 7 "refusing symlinked thread state: $path"
+    [ ! -e "$path" ] || [ -f "$path" ] || die 7 "thread state is not a regular file: $path"
+  done
 }
 
 validate_thread() {
@@ -59,14 +90,6 @@ validate_thread() {
   case "$value" in
     *[!A-Za-z0-9._-]*) die 2 "thread name may contain only ASCII letters, digits, dot, underscore, and hyphen" ;;
   esac
-}
-
-default_thread() {
-  local mode="$1"
-  local branch slug
-  branch="$(git symbolic-ref --short HEAD 2>/dev/null || printf 'detached')"
-  slug="$(printf '%s' "$branch" | tr -c 'A-Za-z0-9._-' '-')"
-  printf '%s-%s\n' "$mode" "$slug"
 }
 
 cleanup() {
@@ -89,6 +112,8 @@ acquire_lock() {
   local thread="$1"
   local owner
   LOCK="$STATE_DIR/$thread.active"
+  [ ! -L "$LOCK" ] || die 7 "refusing symlinked thread lock: $LOCK"
+  [ ! -e "$LOCK" ] || [ -d "$LOCK" ] || die 7 "thread lock is not a directory: $LOCK"
   if mkdir "$LOCK" 2>/dev/null; then
     printf '%s\n' "$$" > "$LOCK/pid" || die 7 "cannot write lock owner"
     return
@@ -132,6 +157,8 @@ status_threads() {
   for id_file in "$STATE_DIR"/*.id; do
     [ -f "$id_file" ] || continue
     thread="$(basename "$id_file" .id)"
+    validate_thread "$thread"
+    assert_thread_files_safe "$thread"
     if [ -n "$requested" ] && [ "$thread" != "$requested" ]; then
       continue
     fi
@@ -152,6 +179,7 @@ status_threads() {
 reset_thread() {
   local thread="$1"
   validate_thread "$thread"
+  assert_thread_files_safe "$thread"
   acquire_lock "$thread"
   rm -f \
     "$STATE_DIR/$thread.id" \
@@ -168,8 +196,14 @@ reset_thread() {
 
 persist_failure() {
   local thread="$1"
-  [ ! -s "$RAW_JSON" ] || cp "$RAW_JSON" "$STATE_DIR/$thread.last-error.json"
-  [ ! -s "$STDERR_FILE" ] || cp "$STDERR_FILE" "$STATE_DIR/$thread.last-error.stderr"
+  if [ -s "$RAW_JSON" ]; then
+    cp "$RAW_JSON" "$STATE_DIR/$thread.last-error.json" \
+      || die 7 "cannot persist Claude failure output"
+  fi
+  if [ -s "$STDERR_FILE" ]; then
+    cp "$STDERR_FILE" "$STATE_DIR/$thread.last-error.stderr" \
+      || die 7 "cannot persist Claude failure stderr"
+  fi
 }
 
 append_log() {
@@ -181,16 +215,21 @@ append_log() {
     printf '\n## %s mode=%s\n\n' "$(date -u +%FT%TZ)" "$mode"
     printf '### prompt\n\n%s\n\n' "$prompt"
     printf '### response\n\n%s\n' "$result"
-  } >> "$STATE_DIR/$thread.log"
+  } >> "$STATE_DIR/$thread.log" || die 7 "cannot append thread log"
 }
 
 atomic_write() {
   local destination="$1"
   local content="$2"
   local temporary="$destination.tmp.$$"
-  printf '%s\n' "$content" > "$temporary" \
-    && mv "$temporary" "$destination" \
-    || die 7 "cannot atomically write '$destination'"
+  if ! printf '%s\n' "$content" > "$temporary"; then
+    rm -f "$temporary"
+    die 7 "cannot write temporary state for '$destination'"
+  fi
+  if ! mv "$temporary" "$destination"; then
+    rm -f "$temporary"
+    die 7 "cannot atomically write '$destination'"
+  fi
 }
 
 run_claude() {
@@ -202,10 +241,12 @@ run_claude() {
   local mode_file="$STATE_DIR/$thread.mode"
   local base_file="$STATE_DIR/$thread.base"
   local context_file="$STATE_DIR/$thread.context.md"
-  local existing_id existing_mode comparison stored_base snapshot_start before role_prompt full_prompt
+  local existing_id existing_mode comparison stored_base resolved_target snapshot_start before
+  local role_prompt full_prompt
   local claude_rc after parse_rc returned_id result metadata
   existing_id="$(cat "$id_file" 2>/dev/null || true)"
   existing_mode="$(cat "$mode_file" 2>/dev/null || true)"
+  assert_thread_files_safe "$thread"
 
   if [ -n "$existing_mode" ] && [ "$existing_mode" != "$mode" ]; then
     die 6 "thread '$thread' belongs to mode '$existing_mode', not '$mode'"
@@ -223,21 +264,38 @@ run_claude() {
 
   comparison=""
   if [ "$mode" = "review" ]; then
+    case "$target_ref" in
+      -*) die 2 "target ref must not start with '-'" ;;
+    esac
     stored_base="$(cat "$base_file" 2>/dev/null || true)"
     if [ -n "$existing_id" ] && [ -z "$stored_base" ]; then
       die 6 "review thread '$thread' has no base ref; reset it before reuse"
     fi
-    case "$stored_base:$target_ref" in
-      [0-9a-f][0-9a-f]*:HEAD) target_ref="$stored_base" ;;
-    esac
-    if [ -n "$stored_base" ] && [ -n "$target_ref" ] && [ "$stored_base" != "$target_ref" ]; then
-      die 6 "thread '$thread' already reviews '$stored_base'; start a new thread for '$target_ref'"
-    fi
-    target_ref="${target_ref:-$stored_base}"
-    target_ref="${target_ref:-${CODEX_CC_TUNER_TARGET_REF:-}}"
-    target_ref="${target_ref:-$(detect_target_ref)}"
-    if [ -z "$existing_id" ] && [ "$target_ref" = "HEAD" ]; then
-      target_ref="$(git rev-parse --verify HEAD^{commit} 2>/dev/null || printf 'HEAD')"
+    if [ -n "$existing_id" ]; then
+      case "$stored_base" in
+        *[!0-9A-Fa-f]*) die 6 "review thread '$thread' has an invalid pinned base; reset it" ;;
+      esac
+      case "${#stored_base}" in
+        40|64) ;;
+        *) die 6 "review thread '$thread' has an invalid pinned base; reset it" ;;
+      esac
+      if [ -n "$target_ref" ]; then
+        resolved_target="$(git rev-parse --verify "$target_ref^{commit}" 2>/dev/null)" \
+          || die 2 "target '$target_ref' is not a valid commit"
+        if [ "$stored_base" != "$resolved_target" ]; then
+          die 6 "thread '$thread' already reviews '$stored_base'; '$target_ref' now resolves to '$resolved_target'"
+        fi
+      fi
+      target_ref="$stored_base"
+    else
+      target_ref="${target_ref:-${CODEX_CC_TUNER_TARGET_REF:-}}"
+      target_ref="${target_ref:-$(detect_target_ref)}"
+      case "$target_ref" in
+        -*) die 2 "target ref must not start with '-'" ;;
+      esac
+      resolved_target="$(git rev-parse --verify "$target_ref^{commit}" 2>/dev/null)" \
+        || die 2 "target '$target_ref' is not a valid commit"
+      target_ref="$resolved_target"
     fi
     comparison="$(python3 "$SNAPSHOT" context \
       --root "$ROOT" \
@@ -298,7 +356,7 @@ $prompt"
     set -- "$@" --name "codex-cc-tuner:$thread"
   fi
 
-  "$CLAUDE_BIN" "$@" "$full_prompt" > "$RAW_JSON" 2> "$STDERR_FILE"
+  printf '%s' "$full_prompt" | "$CLAUDE_BIN" "$@" > "$RAW_JSON" 2> "$STDERR_FILE"
   claude_rc=$?
 
   after="$(python3 "$SNAPSHOT" fingerprint --root "$ROOT" --state-rel "$STATE_REL")" \
@@ -338,7 +396,8 @@ $prompt"
   atomic_write "$mode_file" "$mode"
   atomic_write "$id_file" "$returned_id"
   if [ -s "$STDERR_FILE" ]; then
-    cp "$STDERR_FILE" "$STATE_DIR/$thread.last-stderr"
+    cp "$STDERR_FILE" "$STATE_DIR/$thread.last-stderr" \
+      || die 7 "cannot persist Claude stderr"
     echo "codex-cc-tuner: Claude emitted stderr; saved to $STATE_REL/$thread.last-stderr" >&2
   else
     rm -f "$STATE_DIR/$thread.last-stderr"
@@ -352,8 +411,7 @@ $result"
     "$thread" "$returned_id" "$metadata" "$result"
 }
 
-ensure_local_exclude
-mkdir -p "$STATE_DIR" || die 7 "cannot create state directory"
+prepare_state_dir
 
 action="${1:-}"
 case "$action" in
@@ -370,9 +428,9 @@ case "$action" in
     mode="${2:-}"
     case "$mode" in
       plan|review) ;;
-      *) die 2 "usage: claude-thread.sh dispatch plan|review [thread] [target-ref]" ;;
+      *) die 2 "usage: claude-thread.sh dispatch plan|review thread [target-ref]" ;;
     esac
-    thread="${3:-$(default_thread "$mode")}"
+    thread="${3:-}"
     target_ref="${4:-}"
     validate_thread "$thread"
     prompt="$(cat)"
@@ -383,6 +441,7 @@ case "$action" in
   reply)
     thread="${2:-}"
     validate_thread "$thread"
+    assert_thread_files_safe "$thread"
     [ -f "$STATE_DIR/$thread.id" ] || die 6 "thread does not exist: $thread"
     mode="$(cat "$STATE_DIR/$thread.mode" 2>/dev/null || true)"
     case "$mode" in

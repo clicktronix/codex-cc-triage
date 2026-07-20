@@ -1,6 +1,6 @@
 {
   "name": "codex-cc-tuner",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Ask Claude Code for persistent, read-only planning and code-review second opinions from Codex.",
   "author": {
     "name": "Clicktronix",

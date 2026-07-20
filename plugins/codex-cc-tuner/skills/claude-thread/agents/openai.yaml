@@ -1,7 +1,7 @@
 interface:
   display_name: "Claude Thread"
   short_description: "List or reset persistent Claude thread state"
-  default_prompt: "Use $claude-thread to show my Claude review threads."
+  default_prompt: "Use $codex-cc-tuner:claude-thread to show my Claude review threads."
 
 policy:
   allow_implicit_invocation: false

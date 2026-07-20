@@ -40,6 +40,9 @@ def main() -> int:
     if manifest.get("name") != "codex-cc-tuner":
         fail("plugin name mismatch")
         failures += 1
+    if manifest.get("version") != "0.2.0":
+        fail("plugin version must be 0.2.0")
+        failures += 1
     if entry.get("name") != manifest.get("name"):
         fail("marketplace/plugin name mismatch")
         failures += 1
@@ -67,8 +70,12 @@ def main() -> int:
         if not frontmatter.get("description"):
             fail(f"{skill_file}: empty description")
             failures += 1
-        if not (skill_file.parent / "agents" / "openai.yaml").is_file():
+        agent_file = skill_file.parent / "agents" / "openai.yaml"
+        if not agent_file.is_file():
             fail(f"{skill_file}: missing agents/openai.yaml")
+            failures += 1
+        elif f"$codex-cc-tuner:{name}" not in agent_file.read_text(encoding="utf-8"):
+            fail(f"{agent_file}: default prompt must use the plugin namespace")
             failures += 1
 
     if discovered != expected:

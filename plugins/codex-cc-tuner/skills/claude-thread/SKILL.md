@@ -5,7 +5,8 @@ description: Use only when the user explicitly asks Codex to list, inspect, rese
 
 # Claude Thread
 
-Resolve `<plugin-root>` as the directory two levels above this `SKILL.md`, then run one operation:
+Resolve `<plugin-root>` as two directories above this skill's directory (the parent of `skills/`),
+not as the `skills/` directory itself, then run one operation:
 
 ```bash
 bash "<plugin-root>/scripts/claude-thread.sh" status
@@ -13,8 +14,10 @@ bash "<plugin-root>/scripts/claude-thread.sh" status "<thread>"
 bash "<plugin-root>/scripts/claude-thread.sh" new "<thread>"
 ```
 
-- `status` lists task thread, mode, review base, and Claude session ID.
+- `status` lists task thread, mode, pinned review-base commit, and Claude session ID.
 - `new` deletes only the named thread's local ID, log, context, and diagnostics. The next
-  `$claude-plan` or `$claude-review` call with that name starts a fresh Claude session.
+  `$codex-cc-tuner:claude-plan` or `$codex-cc-tuner:claude-review` call with that name starts a
+  fresh Claude session.
 - Never reset a thread while another call owns its active lock. The driver returns exit 10.
-- Thread state is local and ignored, but may contain prompts and review output. Do not commit it.
+- Thread state is local under `.agent-state/codex-cc-tuner/` and ignored by its own `.gitignore`,
+  but may contain prompts and review output. Do not commit it with `git add -f`.

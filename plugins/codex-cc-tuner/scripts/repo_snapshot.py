@@ -77,12 +77,25 @@ def staged_and_unstaged_diffs(root: Path, state_rel: str) -> tuple[bytes, bytes]
     return staged, unstaged
 
 
-def review_diff(root: Path, state_rel: str, base_ref: str | None) -> tuple[str, bytes]:
+def review_diff(
+    root: Path, state_rel: str, base_ref: str | None
+) -> tuple[str, bytes, bytes]:
     if not has_head(root):
-        return "(unborn)", worktree_diff(root, state_rel, binary=False)
+        inventory = git(root, "status", "--short", "-uall", "--", *pathspecs(state_rel))
+        return "(unborn)", inventory, worktree_diff(root, state_rel, binary=False)
 
     if not base_ref:
-        return "HEAD", git(
+        inventory = git(
+            root,
+            "diff",
+            "--no-ext-diff",
+            "--name-status",
+            "--find-renames",
+            "HEAD",
+            "--",
+            *pathspecs(state_rel),
+        )
+        diff = git(
             root,
             "diff",
             "--no-ext-diff",
@@ -91,10 +104,23 @@ def review_diff(root: Path, state_rel: str, base_ref: str | None) -> tuple[str, 
             "--",
             *pathspecs(state_rel),
         )
+        return "HEAD", inventory, diff
 
+    if base_ref.startswith("-"):
+        raise ValueError("base ref must not start with '-'")
     git(root, "rev-parse", "--verify", f"{base_ref}^{{commit}}")
     merge_base = git(root, "merge-base", base_ref, "HEAD").decode().strip()
-    return f"{base_ref} (merge-base {merge_base})", git(
+    inventory = git(
+        root,
+        "diff",
+        "--no-ext-diff",
+        "--name-status",
+        "--find-renames",
+        merge_base,
+        "--",
+        *pathspecs(state_rel),
+    )
+    diff = git(
         root,
         "diff",
         "--no-ext-diff",
@@ -103,6 +129,7 @@ def review_diff(root: Path, state_rel: str, base_ref: str | None) -> tuple[str, 
         "--",
         *pathspecs(state_rel),
     )
+    return f"{base_ref} (merge-base {merge_base})", inventory, diff
 
 
 def untracked_paths(root: Path, state_rel: str) -> list[Path]:
@@ -190,7 +217,7 @@ def build_context(
     context_limit: int,
     file_limit: int,
 ) -> str:
-    resolved_base, diff = review_diff(root, state_rel, base_ref)
+    resolved_base, inventory, diff = review_diff(root, state_rel, base_ref)
     status_output = git(root, "status", "--short", "-uall", "--", *pathspecs(state_rel))
     writer = BoundedWriter(output, context_limit)
     try:
@@ -198,6 +225,9 @@ def build_context(
         writer.write(
             f"- repository: {root}\n- comparison: {resolved_base}\n\n".encode()
         )
+        writer.write(b"## changed files against base\n\n```text\n")
+        writer.write(inventory or b"(no committed or tracked changes)\n")
+        writer.write(b"```\n\n")
         writer.write(b"## git status\n\n```text\n")
         writer.write(status_output or b"(clean)\n")
         writer.write(b"```\n\n## diff\n\n```diff\n")
@@ -227,7 +257,10 @@ def build_context(
                 continue
             if size > file_limit:
                 writer.write(
-                    f"(text file omitted, {size} bytes exceeds per-file limit)\n".encode()
+                    (
+                        f"(text file omitted, {size} bytes exceeds per-file limit; "
+                        "inspect this path with Read)\n"
+                    ).encode()
                 )
                 continue
             writer.write(b"```text\n")
@@ -237,6 +270,11 @@ def build_context(
             writer.write(b"```\n")
     finally:
         writer.close()
+    if writer.truncated:
+        raise ValueError(
+            f"review context exceeds {context_limit} bytes; split the change or raise "
+            "CODEX_CC_TUNER_CONTEXT_LIMIT"
+        )
     return resolved_base
 
 
@@ -271,6 +309,8 @@ def main() -> int:
             return 0
         if args.output is None:
             raise ValueError("--output is required for context")
+        if args.context_limit <= 0 or args.file_limit <= 0:
+            raise ValueError("context and file limits must be positive")
         comparison = build_context(
             root,
             args.state_rel,

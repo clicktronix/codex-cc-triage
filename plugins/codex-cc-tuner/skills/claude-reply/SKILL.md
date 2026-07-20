@@ -7,8 +7,10 @@ description: Use only when the user explicitly asks Codex to continue, reply to,
 
 Continue an existing Claude session without changing its plan/review role or review base.
 
-1. Require the exact thread name shown by a previous call or by `$claude-thread status`.
-2. Resolve `<plugin-root>` as the directory two levels above this `SKILL.md`.
+1. Require the exact thread name shown by a previous call or by
+   `$codex-cc-tuner:claude-thread status`.
+2. Resolve `<plugin-root>` as two directories above this skill's directory (the parent of
+   `skills/`), not as the `skills/` directory itself.
 3. Send a focused follow-up on stdin:
 
    ```bash
@@ -23,3 +25,7 @@ Continue an existing Claude session without changing its plan/review role or rev
 
 Missing, malformed, or mode-corrupt threads are hard failures. Never fall back to a new session
 without telling the user.
+
+The Claude subprocess requires outbound network access. If Codex blocks it, request approval for
+this bridge command or explain the narrow `workspace-write` network setting; never recommend
+disabling sandboxing globally.

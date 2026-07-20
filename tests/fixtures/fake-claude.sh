@@ -6,12 +6,10 @@ prompt_log="${FAKE_CLAUDE_PROMPT_LOG:?FAKE_CLAUDE_PROMPT_LOG is required}"
 session_id="11111111-1111-4111-8111-111111111111"
 resumed=0
 expect_resume_id=0
-last_arg=""
 
 : > "$prompt_log"
 for arg in "$@"; do
   printf '%s\n' "$arg" >> "$args_log"
-  last_arg="$arg"
   if [ "$expect_resume_id" -eq 1 ]; then
     session_id="$arg"
     resumed=1
@@ -20,7 +18,7 @@ for arg in "$@"; do
     expect_resume_id=1
   fi
 done
-printf '%s' "$last_arg" > "$prompt_log"
+cat > "$prompt_log"
 
 if [ "${FAKE_CLAUDE_MUTATE:-0}" = "1" ]; then
   printf 'mutated by fake Claude\n' >> "${FAKE_CLAUDE_PROJECT_DIR:?}/mutable.txt"

@@ -5,15 +5,18 @@ description: Use only when the user explicitly asks Codex to have Claude Code re
 
 # Claude Review
 
-Use Claude Code as a read-only reviewer. The wrapper builds a complete branch snapshot, including
-committed, staged, unstaged, and untracked changes. Codex owns final triage and verification.
+Use Claude Code as a read-only reviewer. The wrapper builds a bounded branch snapshot containing
+committed, staged, unstaged, and untracked changes. It hard-fails rather than truncating a diff.
+Codex owns final triage and verification.
 
 1. Inspect the branch and intended base ref yourself. Derive a task-scoped thread name such as
    `review-feat-billing`; never reuse a generic `review` thread across unrelated changes.
-2. Resolve `<plugin-root>` as the directory two levels above this `SKILL.md`.
+2. Resolve `<plugin-root>` as two directories above this skill's directory (the parent of
+   `skills/`), not as the `skills/` directory itself.
 3. Build a concise review request with the task intent, acceptance criteria, requested lenses, and
    any known test results. Do not bias Claude with your suspected findings.
-4. Pass the integration target explicitly when known:
+4. Pass the integration target explicitly when known. The first round pins it to a commit; if that
+   ref moves later, start a new thread instead of mixing review bases:
 
    ```bash
    bash "<plugin-root>/scripts/claude-thread.sh" \
@@ -34,3 +37,7 @@ committed, staged, unstaged, and untracked changes. Codex owns final triage and 
 
 If the driver exits non-zero, report its exact diagnostic. Do not silently create a fresh session
 after a failed resume.
+
+The Claude subprocess requires outbound network access. If Codex blocks it, request approval for
+this bridge command or explain the narrow `workspace-write` network setting; never recommend
+disabling sandboxing globally.

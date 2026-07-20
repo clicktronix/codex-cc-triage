@@ -1,7 +1,7 @@
 interface:
   display_name: "Claude Review"
   short_description: "Review a branch with persistent Claude context"
-  default_prompt: "Use $codex-cc-tuner:claude-review to review my current branch."
+  default_prompt: "Use $codex-cc-triage:claude-review to review my current branch."
 
 policy:
   allow_implicit_invocation: false

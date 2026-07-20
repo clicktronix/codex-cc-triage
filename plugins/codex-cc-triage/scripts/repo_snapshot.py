@@ -205,7 +205,7 @@ class BoundedWriter:
 
     def close(self) -> None:
         if self.truncated:
-            self._handle.write(b"\n\n[context truncated by codex-cc-tuner]\n")
+            self._handle.write(b"\n\n[context truncated by codex-cc-triage]\n")
         self._handle.close()
 
 
@@ -221,7 +221,7 @@ def build_context(
     status_output = git(root, "status", "--short", "-uall", "--", *pathspecs(state_rel))
     writer = BoundedWriter(output, context_limit)
     try:
-        writer.write(b"# codex-cc-tuner review context\n\n")
+        writer.write(b"# codex-cc-triage review context\n\n")
         writer.write(
             f"- repository: {root}\n- comparison: {resolved_base}\n\n".encode()
         )
@@ -273,7 +273,7 @@ def build_context(
     if writer.truncated:
         raise ValueError(
             f"review context exceeds {context_limit} bytes; split the change or raise "
-            "CODEX_CC_TUNER_CONTEXT_LIMIT"
+            "CODEX_CC_TRIAGE_CONTEXT_LIMIT"
         )
     return resolved_base
 
@@ -289,13 +289,13 @@ def parse_args() -> argparse.Namespace:
         "--context-limit",
         type=int,
         default=int(
-            os.environ.get("CODEX_CC_TUNER_CONTEXT_LIMIT", DEFAULT_CONTEXT_LIMIT)
+            os.environ.get("CODEX_CC_TRIAGE_CONTEXT_LIMIT", DEFAULT_CONTEXT_LIMIT)
         ),
     )
     parser.add_argument(
         "--file-limit",
         type=int,
-        default=int(os.environ.get("CODEX_CC_TUNER_FILE_LIMIT", DEFAULT_FILE_LIMIT)),
+        default=int(os.environ.get("CODEX_CC_TRIAGE_FILE_LIMIT", DEFAULT_FILE_LIMIT)),
     )
     return parser.parse_args()
 
@@ -322,7 +322,7 @@ def main() -> int:
         print(comparison)
         return 0
     except (GitError, OSError, ValueError) as error:
-        print(f"codex-cc-tuner: {error}", file=sys.stderr)
+        print(f"codex-cc-triage: {error}", file=sys.stderr)
         return 1
 
 

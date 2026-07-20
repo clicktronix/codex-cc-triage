@@ -24,15 +24,15 @@ def main() -> int:
     try:
         payload = json.loads(args.input.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
-        print(f"codex-cc-tuner: invalid Claude JSON: {error}", file=sys.stderr)
+        print(f"codex-cc-triage: invalid Claude JSON: {error}", file=sys.stderr)
         return 1
 
     if not isinstance(payload, dict):
-        print("codex-cc-tuner: Claude JSON root must be an object", file=sys.stderr)
+        print("codex-cc-triage: Claude JSON root must be an object", file=sys.stderr)
         return 1
     if payload.get("is_error") is True:
         print(
-            f"codex-cc-tuner: Claude reported an error: {payload.get('result', '')}",
+            f"codex-cc-triage: Claude reported an error: {payload.get('result', '')}",
             file=sys.stderr,
         )
         return 2
@@ -41,7 +41,7 @@ def main() -> int:
     result = payload.get("result")
     if not isinstance(session_id, str) or not isinstance(result, str):
         print(
-            "codex-cc-tuner: Claude JSON needs string session_id and result",
+            "codex-cc-triage: Claude JSON needs string session_id and result",
             file=sys.stderr,
         )
         return 1
@@ -49,12 +49,12 @@ def main() -> int:
         parsed_id = uuid.UUID(session_id)
     except ValueError:
         print(
-            f"codex-cc-tuner: invalid Claude session_id: {session_id}", file=sys.stderr
+            f"codex-cc-triage: invalid Claude session_id: {session_id}", file=sys.stderr
         )
         return 1
     if str(parsed_id) != session_id.lower():
         print(
-            f"codex-cc-tuner: non-canonical Claude session_id: {session_id}",
+            f"codex-cc-triage: non-canonical Claude session_id: {session_id}",
             file=sys.stderr,
         )
         return 1

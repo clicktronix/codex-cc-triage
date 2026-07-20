@@ -20,9 +20,9 @@ Codex owns final triage and verification.
 
    ```bash
    bash "<plugin-root>/scripts/claude-thread.sh" \
-     dispatch review "<thread>" "<target-ref>" <<'CODEX_CC_TUNER_PROMPT'
+     dispatch review "<thread>" "<target-ref>" <<'CODEX_CC_TRIAGE_PROMPT'
    <prompt text>
-   CODEX_CC_TUNER_PROMPT
+   CODEX_CC_TRIAGE_PROMPT
    ```
 
    If no target is known, omit it; the driver tries `origin/main`, `main`, `origin/master`, then

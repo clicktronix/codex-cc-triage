@@ -2,13 +2,13 @@
 set -u
 
 ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
-DRIVER="$ROOT/plugins/codex-cc-tuner/scripts/claude-thread.sh"
+DRIVER="$ROOT/plugins/codex-cc-triage/scripts/claude-thread.sh"
 FAKE="$ROOT/tests/fixtures/fake-claude.sh"
 TMP="$(mktemp -d)" || exit 1
 REPO="$TMP/repo"
 ARGS_LOG="$TMP/args.log"
 PROMPT_LOG="$TMP/prompt.log"
-STATE_REL=".agent-state/codex-cc-tuner"
+STATE_REL=".agent-state/codex-cc-triage"
 failures=0
 
 cleanup() {
@@ -29,10 +29,10 @@ run_bridge() {
   prompt="$1"
   shift
   printf '%s' "$prompt" | env \
-    CODEX_CC_TUNER_PROJECT_DIR="$REPO" \
-    CODEX_CC_TUNER_CLAUDE_BIN="$FAKE" \
-    CODEX_CC_TUNER_MODEL="haiku" \
-    CODEX_CC_TUNER_MAX_BUDGET_USD="0.25" \
+    CODEX_CC_TRIAGE_PROJECT_DIR="$REPO" \
+    CODEX_CC_TRIAGE_CLAUDE_BIN="$FAKE" \
+    CODEX_CC_TRIAGE_MODEL="haiku" \
+    CODEX_CC_TRIAGE_MAX_BUDGET_USD="0.25" \
     FAKE_CLAUDE_ARGS_LOG="$ARGS_LOG" \
     FAKE_CLAUDE_PROMPT_LOG="$PROMPT_LOG" \
     FAKE_CLAUDE_PROJECT_DIR="$REPO" \
@@ -200,7 +200,7 @@ else
   fail "stale lock is taken over (rc=$rc, output=$output)"
 fi
 
-status_output="$(CODEX_CC_TUNER_PROJECT_DIR="$REPO" bash "$DRIVER" status review-feat-billing 2>&1)"
+status_output="$(CODEX_CC_TRIAGE_PROJECT_DIR="$REPO" bash "$DRIVER" status review-feat-billing 2>&1)"
 rc=$?
 if [ "$rc" -eq 0 ] && printf '%s' "$status_output" | grep -q 'mode=review' \
   && printf '%s' "$status_output" | grep -q "base=$MAIN_BASE"; then
@@ -209,7 +209,7 @@ else
   fail "status reports mode and base (rc=$rc, output=$status_output)"
 fi
 
-reset_output="$(CODEX_CC_TUNER_PROJECT_DIR="$REPO" bash "$DRIVER" new review-feat-billing 2>&1)"
+reset_output="$(CODEX_CC_TRIAGE_PROJECT_DIR="$REPO" bash "$DRIVER" new review-feat-billing 2>&1)"
 rc=$?
 if [ "$rc" -eq 0 ] && [ ! -e "$REPO/$STATE_REL/review-feat-billing.id" ]; then
   pass "new resets only named thread"
@@ -252,7 +252,7 @@ fi
 REPO="$ORIGINAL_REPO"
 
 BRIDGE_ARGS=(dispatch review review-too-large main)
-output="$(run_bridge "Review bounded context" env CODEX_CC_TUNER_CONTEXT_LIMIT=256 2>&1)"
+output="$(run_bridge "Review bounded context" env CODEX_CC_TRIAGE_CONTEXT_LIMIT=256 2>&1)"
 rc=$?
 if [ "$rc" -eq 7 ] && printf '%s' "$output" | grep -q 'review context exceeds'; then
   pass "oversized review context fails instead of omitting files"
@@ -301,7 +301,7 @@ REPO="$SYMLINK_REPO"
 BRIDGE_ARGS=(dispatch plan plan-symlink)
 output="$(run_bridge "Reject symlink" env 2>&1)"
 rc=$?
-if [ "$rc" -eq 7 ] && [ ! -e "$SYMLINK_TARGET/codex-cc-tuner/plan-symlink.id" ]; then
+if [ "$rc" -eq 7 ] && [ ! -e "$SYMLINK_TARGET/codex-cc-triage/plan-symlink.id" ]; then
   pass "symlinked state parent is rejected"
 else
   fail "symlinked state parent is rejected (rc=$rc, output=$output)"

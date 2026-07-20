@@ -19,9 +19,9 @@ objection against the repository before changing the plan.
 5. Send it on stdin without shell interpolation:
 
    ```bash
-   bash "<plugin-root>/scripts/claude-thread.sh" dispatch plan "<thread>" <<'CODEX_CC_TUNER_PROMPT'
+   bash "<plugin-root>/scripts/claude-thread.sh" dispatch plan "<thread>" <<'CODEX_CC_TRIAGE_PROMPT'
    <prompt text>
-   CODEX_CC_TUNER_PROMPT
+   CODEX_CC_TRIAGE_PROMPT
    ```
 
 6. Report the thread name. Check Claude's findings against live code and current primary docs;

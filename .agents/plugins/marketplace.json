@@ -1,14 +1,14 @@
 {
-  "name": "codex-cc-tuner",
+  "name": "codex-cc-triage",
   "interface": {
-    "displayName": "Codex CC Tuner"
+    "displayName": "Codex CC Triage"
   },
   "plugins": [
     {
-      "name": "codex-cc-tuner",
+      "name": "codex-cc-triage",
       "source": {
         "source": "local",
-        "path": "./plugins/codex-cc-tuner"
+        "path": "./plugins/codex-cc-triage"
       },
       "policy": {
         "installation": "AVAILABLE",

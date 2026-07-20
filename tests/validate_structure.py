@@ -29,7 +29,7 @@ def parse_frontmatter(path: Path) -> dict[str, str]:
 
 def main() -> int:
     root = Path(__file__).resolve().parent.parent
-    plugin = root / "plugins" / "codex-cc-tuner"
+    plugin = root / "plugins" / "codex-cc-triage"
     failures = 0
 
     manifest = json.loads((plugin / ".codex-plugin" / "plugin.json").read_text())
@@ -37,16 +37,16 @@ def main() -> int:
         (root / ".agents" / "plugins" / "marketplace.json").read_text()
     )
     entry = marketplace["plugins"][0]
-    if manifest.get("name") != "codex-cc-tuner":
+    if manifest.get("name") != "codex-cc-triage":
         fail("plugin name mismatch")
         failures += 1
-    if manifest.get("version") != "0.2.0":
-        fail("plugin version must be 0.2.0")
+    if manifest.get("version") != "0.3.0":
+        fail("plugin version must be 0.3.0")
         failures += 1
     if entry.get("name") != manifest.get("name"):
         fail("marketplace/plugin name mismatch")
         failures += 1
-    if entry.get("source", {}).get("path") != "./plugins/codex-cc-tuner":
+    if entry.get("source", {}).get("path") != "./plugins/codex-cc-triage":
         fail("marketplace source path mismatch")
         failures += 1
 
@@ -74,7 +74,7 @@ def main() -> int:
         if not agent_file.is_file():
             fail(f"{skill_file}: missing agents/openai.yaml")
             failures += 1
-        elif f"$codex-cc-tuner:{name}" not in agent_file.read_text(encoding="utf-8"):
+        elif f"$codex-cc-triage:{name}" not in agent_file.read_text(encoding="utf-8"):
             fail(f"{agent_file}: default prompt must use the plugin namespace")
             failures += 1
 

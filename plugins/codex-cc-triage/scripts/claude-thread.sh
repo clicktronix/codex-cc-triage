@@ -6,11 +6,11 @@ umask 077
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
 SNAPSHOT="$SCRIPT_DIR/repo_snapshot.py"
 PARSER="$SCRIPT_DIR/parse_claude_json.py"
-STATE_REL=".agent-state/codex-cc-tuner"
-ROOT="${CODEX_CC_TUNER_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || true)}"
-CLAUDE_BIN="${CODEX_CC_TUNER_CLAUDE_BIN:-claude}"
-MODEL="${CODEX_CC_TUNER_MODEL:-sonnet}"
-BUDGET="${CODEX_CC_TUNER_MAX_BUDGET_USD:-1.00}"
+STATE_REL=".agent-state/codex-cc-triage"
+ROOT="${CODEX_CC_TRIAGE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || true)}"
+CLAUDE_BIN="${CODEX_CC_TRIAGE_CLAUDE_BIN:-claude}"
+MODEL="${CODEX_CC_TRIAGE_MODEL:-sonnet}"
+BUDGET="${CODEX_CC_TRIAGE_MAX_BUDGET_USD:-1.00}"
 LOCK=""
 RAW_JSON=""
 STDERR_FILE=""
@@ -21,7 +21,7 @@ PARSED_META=""
 die() {
   local code="$1"
   shift
-  echo "codex-cc-tuner: $*" >&2
+  echo "codex-cc-triage: $*" >&2
   exit "$code"
 }
 
@@ -288,7 +288,7 @@ run_claude() {
       fi
       target_ref="$stored_base"
     else
-      target_ref="${target_ref:-${CODEX_CC_TUNER_TARGET_REF:-}}"
+      target_ref="${target_ref:-${CODEX_CC_TRIAGE_TARGET_REF:-}}"
       target_ref="${target_ref:-$(detect_target_ref)}"
       case "$target_ref" in
         -*) die 2 "target ref must not start with '-'" ;;
@@ -353,7 +353,7 @@ $prompt"
   if [ -n "$existing_id" ]; then
     set -- "$@" --resume "$existing_id"
   else
-    set -- "$@" --name "codex-cc-tuner:$thread"
+    set -- "$@" --name "codex-cc-triage:$thread"
   fi
 
   printf '%s' "$full_prompt" | "$CLAUDE_BIN" "$@" > "$RAW_JSON" 2> "$STDERR_FILE"
@@ -398,7 +398,7 @@ $prompt"
   if [ -s "$STDERR_FILE" ]; then
     cp "$STDERR_FILE" "$STATE_DIR/$thread.last-stderr" \
       || die 7 "cannot persist Claude stderr"
-    echo "codex-cc-tuner: Claude emitted stderr; saved to $STATE_REL/$thread.last-stderr" >&2
+    echo "codex-cc-triage: Claude emitted stderr; saved to $STATE_REL/$thread.last-stderr" >&2
   else
     rm -f "$STATE_DIR/$thread.last-stderr"
   fi

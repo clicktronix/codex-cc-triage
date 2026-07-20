@@ -1,7 +1,7 @@
 interface:
   display_name: "Claude Plan"
   short_description: "Stress-test a plan with persistent Claude context"
-  default_prompt: "Use $codex-cc-tuner:claude-plan to critique this implementation plan."
+  default_prompt: "Use $codex-cc-triage:claude-plan to critique this implementation plan."
 
 policy:
   allow_implicit_invocation: false

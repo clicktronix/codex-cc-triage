@@ -1,10 +1,10 @@
-# codex-cc-tuner
+# codex-cc-triage
 
 A Codex plugin for persistent, read-only second opinions from Claude Code.
 
 Use it to stress-test a plan, review a complete branch diff, and ask follow-up questions in the
 same Claude session. Threads are task-scoped and stored locally under
-`.agent-state/codex-cc-tuner/`.
+`.agent-state/codex-cc-triage/`.
 
 ## Install
 
@@ -13,21 +13,21 @@ network access. With Codex's default `workspace-write` sandbox, approve the brid
 prompted or enable command network access for the session; do not disable the sandbox globally.
 
 ```bash
-codex plugin marketplace add clicktronix/codex-cc-tuner --ref main
-codex plugin add codex-cc-tuner@codex-cc-tuner
+codex plugin marketplace add clicktronix/codex-cc-triage --ref main
+codex plugin add codex-cc-triage@codex-cc-triage
 ```
 
 Start a new Codex thread after installation, then invoke a skill explicitly:
 
 ```text
-$codex-cc-tuner:claude-plan stress-test docs/plans/new-billing-flow.md
-$codex-cc-tuner:claude-review review this branch against main for correctness and regressions
-$codex-cc-tuner:claude-reply review-feat-billing re-evaluate after my fixes
-$codex-cc-tuner:claude-thread status
-$codex-cc-tuner:claude-thread new review-feat-billing
+$codex-cc-triage:claude-plan stress-test docs/plans/new-billing-flow.md
+$codex-cc-triage:claude-review review this branch against main for correctness and regressions
+$codex-cc-triage:claude-reply review-feat-billing re-evaluate after my fixes
+$codex-cc-triage:claude-thread status
+$codex-cc-triage:claude-thread new review-feat-billing
 ```
 
-`$codex-cc-tuner:claude-plan` and `$codex-cc-tuner:claude-review` derive task-scoped thread names.
+`$codex-cc-triage:claude-plan` and `$codex-cc-triage:claude-review` derive task-scoped thread names.
 Re-running either skill with the same thread resumes the existing Claude session instead of
 starting over. A review thread pins its integration target to the exact commit from the first
 round; if a named target such as `main` moves, start a new review thread for the new base.
@@ -46,7 +46,7 @@ Claude instead of silently omitting later files. Split the change or raise the c
 deliberately.
 
 The inspected repository content is sent through your configured Claude Code account. Local thread
-IDs, prompts, results, and diagnostics remain in `.agent-state/codex-cc-tuner/`. Its internal
+IDs, prompts, results, and diagnostics remain in `.agent-state/codex-cc-triage/`. Its internal
 `.gitignore` keeps the directory out of Git without modifying protected `.git/` metadata.
 
 ## Configuration
@@ -55,15 +55,19 @@ Environment variables:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `CODEX_CC_TUNER_CLAUDE_BIN` | `claude` | Claude Code executable |
-| `CODEX_CC_TUNER_MODEL` | `sonnet` | Claude model or alias |
-| `CODEX_CC_TUNER_MAX_BUDGET_USD` | `1.00` | Per-call print-mode budget cap |
-| `CODEX_CC_TUNER_TARGET_REF` | auto-detected | Default review base ref |
-| `CODEX_CC_TUNER_CONTEXT_LIMIT` | `5242880` | Maximum complete review context in bytes |
-| `CODEX_CC_TUNER_FILE_LIMIT` | `1048576` | Inline limit for one untracked text file |
+| `CODEX_CC_TRIAGE_CLAUDE_BIN` | `claude` | Claude Code executable |
+| `CODEX_CC_TRIAGE_MODEL` | `sonnet` | Claude model or alias |
+| `CODEX_CC_TRIAGE_MAX_BUDGET_USD` | `1.00` | Per-call print-mode budget cap |
+| `CODEX_CC_TRIAGE_TARGET_REF` | auto-detected | Default review base ref |
+| `CODEX_CC_TRIAGE_CONTEXT_LIMIT` | `5242880` | Maximum complete review context in bytes |
+| `CODEX_CC_TRIAGE_FILE_LIMIT` | `1048576` | Inline limit for one untracked text file |
 
 Claude Code 2.1.215 no longer exposes the older `--max-turns` CLI flag, so the wrapper relies on the
 current print-mode budget cap instead.
+
+Version 0.3 renames the plugin from `codex-cc-tuner` to `codex-cc-triage` so it mirrors
+`cc-codex-triage`. Existing state under `.agent-state/codex-cc-tuner/` is left untouched; move only
+the task-scoped threads you still need into `.agent-state/codex-cc-triage/`.
 
 Version 0.2 moves state from `.codex/claude-threads/` to the sandbox-compatible path above. Existing
 0.1 threads are not deleted. Plan threads and review threads whose `.base` already contains a commit

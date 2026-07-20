@@ -1,6 +1,6 @@
 ---
 name: claude-reply
-description: Use only when the user explicitly asks Codex to continue, reply to, or re-evaluate an existing codex-cc-tuner Claude thread by name.
+description: Use only when the user explicitly asks Codex to continue, reply to, or re-evaluate an existing codex-cc-triage Claude thread by name.
 ---
 
 # Claude Reply
@@ -8,15 +8,15 @@ description: Use only when the user explicitly asks Codex to continue, reply to,
 Continue an existing Claude session without changing its plan/review role or review base.
 
 1. Require the exact thread name shown by a previous call or by
-   `$codex-cc-tuner:claude-thread status`.
+   `$codex-cc-triage:claude-thread status`.
 2. Resolve `<plugin-root>` as two directories above this skill's directory (the parent of
    `skills/`), not as the `skills/` directory itself.
 3. Send a focused follow-up on stdin:
 
    ```bash
-   bash "<plugin-root>/scripts/claude-thread.sh" reply "<thread>" <<'CODEX_CC_TUNER_PROMPT'
+   bash "<plugin-root>/scripts/claude-thread.sh" reply "<thread>" <<'CODEX_CC_TRIAGE_PROMPT'
    <prompt text>
-   CODEX_CC_TUNER_PROMPT
+   CODEX_CC_TRIAGE_PROMPT
    ```
 
 4. For review threads, the driver regenerates the complete current diff before resuming. Ask for a

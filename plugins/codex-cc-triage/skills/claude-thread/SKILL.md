@@ -1,6 +1,6 @@
 ---
 name: claude-thread
-description: Use only when the user explicitly asks Codex to list, inspect, reset, or start fresh from codex-cc-tuner Claude thread state.
+description: Use only when the user explicitly asks Codex to list, inspect, reset, or start fresh from codex-cc-triage Claude thread state.
 ---
 
 # Claude Thread
@@ -16,8 +16,8 @@ bash "<plugin-root>/scripts/claude-thread.sh" new "<thread>"
 
 - `status` lists task thread, mode, pinned review-base commit, and Claude session ID.
 - `new` deletes only the named thread's local ID, log, context, and diagnostics. The next
-  `$codex-cc-tuner:claude-plan` or `$codex-cc-tuner:claude-review` call with that name starts a
+  `$codex-cc-triage:claude-plan` or `$codex-cc-triage:claude-review` call with that name starts a
   fresh Claude session.
 - Never reset a thread while another call owns its active lock. The driver returns exit 10.
-- Thread state is local under `.agent-state/codex-cc-tuner/` and ignored by its own `.gitignore`,
+- Thread state is local under `.agent-state/codex-cc-triage/` and ignored by its own `.gitignore`,
   but may contain prompts and review output. Do not commit it with `git add -f`.

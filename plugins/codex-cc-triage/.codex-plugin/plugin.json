@@ -1,7 +1,7 @@
 {
   "name": "codex-cc-triage",
-  "version": "0.3.0",
-  "description": "Ask Claude Code for persistent, read-only planning and code-review second opinions from Codex.",
+  "version": "0.4.0",
+  "description": "Ask Claude Code for persistent, read-only technical, planning, and code-review second opinions from Codex.",
   "author": {
     "name": "Clicktronix",
     "url": "https://github.com/clicktronix"
@@ -19,8 +19,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Codex CC Triage",
-    "shortDescription": "Get persistent Claude Code second opinions.",
-    "longDescription": "Use task-scoped Claude Code sessions from Codex to stress-test plans, review branch diffs, and re-evaluate fixes without granting the child agent write access.",
+    "shortDescription": "Read-only Claude opinions",
+    "longDescription": "Use task-scoped Claude Code sessions from Codex to ask bounded technical questions, stress-test plans, review branch diffs, and re-evaluate fixes without granting the child agent write access.",
     "developerName": "Clicktronix",
     "category": "Developer Tools",
     "capabilities": [
@@ -30,7 +30,8 @@
     "websiteURL": "https://github.com/clicktronix/codex-cc-triage",
     "defaultPrompt": [
       "Ask Claude Code to review my current branch",
-      "Stress-test this implementation plan with Claude Code"
+      "Stress-test this implementation plan with Claude Code",
+      "Ask Claude Code for a second opinion on this technical decision"
     ]
   }
 }

@@ -1,0 +1,7 @@
+interface:
+  display_name: "Claude Second Opinion"
+  short_description: "Ask Claude one bounded technical question"
+  default_prompt: "Use $codex-cc-triage:claude-second-opinion to get a second opinion on this decision."
+
+policy:
+  allow_implicit_invocation: false

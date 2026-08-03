@@ -1,6 +1,36 @@
 #!/usr/bin/env bash
 set -u
 
+if [ "${1:-}" = "--help" ]; then
+  for flag in \
+    --safe-mode \
+    --permission-mode \
+    --tools \
+    --strict-mcp-config \
+    --disable-slash-commands \
+    --no-chrome \
+    --model \
+    --max-budget-usd \
+    --output-format \
+    --resume \
+    --name; do
+    [ "$flag" = "${FAKE_CLAUDE_MISSING_FLAG:-}" ] || printf '%s\n' "$flag"
+  done
+  printf '%s\n' '--remote-control-session-name-prefix'
+  printf '%s\n' '--name-prefix'
+  printf '%s\n' 'description mentions --name but does not declare it'
+  exit 0
+fi
+
+if [ "${1:-}" = "auth" ] && [ "${2:-}" = "status" ]; then
+  if [ "${FAKE_CLAUDE_AUTHENTICATED:-1}" = "1" ]; then
+    printf '{"loggedIn":true,"authMethod":"test"}\n'
+    exit 0
+  fi
+  printf '{"loggedIn":false}\n'
+  exit 1
+fi
+
 args_log="${FAKE_CLAUDE_ARGS_LOG:?FAKE_CLAUDE_ARGS_LOG is required}"
 prompt_log="${FAKE_CLAUDE_PROMPT_LOG:?FAKE_CLAUDE_PROMPT_LOG is required}"
 session_id="11111111-1111-4111-8111-111111111111"
@@ -19,6 +49,19 @@ for arg in "$@"; do
   fi
 done
 cat > "$prompt_log"
+
+if [ -n "${FAKE_CLAUDE_SLEEP_SECONDS:-}" ]; then
+  sleep "$FAKE_CLAUDE_SLEEP_SECONDS"
+fi
+
+if [ "${FAKE_CLAUDE_EXIT_124:-0}" = "1" ]; then
+  echo "fake Claude exit 124" >&2
+  exit 124
+fi
+
+if [ "${FAKE_CLAUDE_SILENT_FAIL:-0}" = "1" ]; then
+  exit 9
+fi
 
 if [ "${FAKE_CLAUDE_MUTATE:-0}" = "1" ]; then
   printf 'mutated by fake Claude\n' >> "${FAKE_CLAUDE_PROJECT_DIR:?}/mutable.txt"

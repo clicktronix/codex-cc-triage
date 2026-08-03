@@ -55,3 +55,27 @@ if CODEX_CC_TRIAGE_REPO_ROOT="$MUTANT" \
   exit 1
 fi
 echo "PASS commented macOS contract mutation is rejected"
+
+cp "$ROOT/.github/workflows/validate.yml" "$workflow" || exit 1
+sed '/      - run: bash tests\/run.sh/a\
+        continue-on-error: true' \
+  "$workflow" > "$workflow.tmp" || exit 1
+mv "$workflow.tmp" "$workflow" || exit 1
+if CODEX_CC_TRIAGE_REPO_ROOT="$MUTANT" \
+  python3 "$ROOT/tests/validate_structure.py" >/dev/null 2>&1; then
+  echo "FAIL continue-on-error contract survived structure validation" >&2
+  exit 1
+fi
+echo "PASS continue-on-error mutation is rejected"
+
+cp "$ROOT/.github/workflows/validate.yml" "$workflow" || exit 1
+sed '/      - run: bash tests\/run.sh/a\
+    if: false' \
+  "$workflow" > "$workflow.tmp" || exit 1
+mv "$workflow.tmp" "$workflow" || exit 1
+if CODEX_CC_TRIAGE_REPO_ROOT="$MUTANT" \
+  python3 "$ROOT/tests/validate_structure.py" >/dev/null 2>&1; then
+  echo "FAIL disabled validation job survived structure validation" >&2
+  exit 1
+fi
+echo "PASS disabled validation job mutation is rejected"

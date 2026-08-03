@@ -116,7 +116,7 @@ def main() -> int:
         r"    runs-on: \$\{\{ matrix\.os \}\}\n"
         r"    steps:\n"
         r"      - uses: actions/checkout@v7\n"
-        r"      - run: bash tests/run\.sh$",
+        r"      - run: bash tests/run\.sh\n?(?=  [A-Za-z0-9_-]+:\n|\Z)",
         re.MULTILINE,
     )
     if not workflow_contract.search(workflow):

@@ -16,12 +16,14 @@ python3 -m py_compile \
   "$ROOT/plugins/codex-cc-triage/scripts/repo_snapshot.py" \
   "$ROOT/plugins/codex-cc-triage/scripts/parse_claude_json.py" \
   "$ROOT/plugins/codex-cc-triage/scripts/run_with_timeout.py" \
-  "$ROOT/tests/validate_structure.py"
+  "$ROOT/tests/validate_structure.py" \
+  "$ROOT/tests/test_timeout_runner.py"
 
 bash "$ROOT/tests/driver-regression.sh"
 python3 "$ROOT/tests/validate_structure.py"
 bash "$ROOT/tests/structure-regression.sh"
 bash "$ROOT/tests/timeout-runner-regression.sh"
+python3 "$ROOT/tests/test_timeout_runner.py"
 python3 -m json.tool "$ROOT/.agents/plugins/marketplace.json" >/dev/null
 python3 -m json.tool "$ROOT/plugins/codex-cc-triage/.codex-plugin/plugin.json" >/dev/null
 

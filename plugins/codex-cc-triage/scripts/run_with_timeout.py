@@ -10,12 +10,22 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Optional
+
+
+TERMINATION_GRACE_SECONDS = 5.0
+GROUP_VERIFY_SECONDS = 1.0
+SIGNAL_RETRY_SECONDS = 0.05
 
 
 class TerminationRequested(Exception):
     def __init__(self, signum: int) -> None:
         super().__init__(signum)
         self.signum = signum
+
+
+class ProcessGroupTerminationError(RuntimeError):
+    pass
 
 
 def parse_args() -> argparse.Namespace:
@@ -35,28 +45,83 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def terminate_process_group(process: subprocess.Popen[bytes]) -> None:
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        process.wait()
-        return
+def signal_process_group(pid: int, signum: int) -> Optional[PermissionError]:
+    """Signal a process group, retrying transient macOS permission races."""
+    last_error: Optional[PermissionError] = None
+    for _attempt in range(3):
+        try:
+            os.killpg(pid, signum)
+            return None
+        except ProcessLookupError:
+            return None
+        except PermissionError as error:
+            last_error = error
+            time.sleep(SIGNAL_RETRY_SECONDS)
+    return last_error
 
-    deadline = time.monotonic() + 5
+
+def process_group_exists(pid: int) -> bool:
+    try:
+        os.killpg(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # EPERM still proves that the group exists; it does not prove cleanup.
+        return True
+    return True
+
+
+def terminate_process_group(process: subprocess.Popen[bytes]) -> None:
+    term_error = signal_process_group(process.pid, signal.SIGTERM)
+    deadline = time.monotonic() + TERMINATION_GRACE_SECONDS
     while time.monotonic() < deadline:
         process.poll()
-        try:
-            os.killpg(process.pid, 0)
-        except ProcessLookupError:
+        if not process_group_exists(process.pid):
             process.wait()
             return
-        time.sleep(0.05)
+        if term_error is not None:
+            term_error = signal_process_group(process.pid, signal.SIGTERM)
+        time.sleep(SIGNAL_RETRY_SECONDS)
+
+    kill_error = signal_process_group(process.pid, signal.SIGKILL)
+    if kill_error is not None and process.poll() is None:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+        except OSError as error:
+            raise ProcessGroupTerminationError(
+                f"cannot signal Claude process or group: {error}"
+            ) from error
 
     try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    process.wait()
+        process.wait(timeout=TERMINATION_GRACE_SECONDS)
+    except subprocess.TimeoutExpired as error:
+        raise ProcessGroupTerminationError(
+            "Claude process did not exit after SIGKILL"
+        ) from error
+
+    verify_deadline = time.monotonic() + GROUP_VERIFY_SECONDS
+    while time.monotonic() < verify_deadline:
+        if not process_group_exists(process.pid):
+            return
+        if kill_error is not None:
+            kill_error = signal_process_group(process.pid, signal.SIGKILL)
+        time.sleep(SIGNAL_RETRY_SECONDS)
+
+    if process_group_exists(process.pid):
+        detail = f": {kill_error}" if kill_error is not None else ""
+        raise ProcessGroupTerminationError(
+            f"could not confirm termination of Claude process group{detail}"
+        )
+
+
+def append_diagnostic(path: Path, message: str) -> None:
+    try:
+        with path.open("ab") as output:
+            output.write(f"codex-cc-triage: {message}\n".encode())
+    except OSError:
+        print(f"codex-cc-triage: {message}", file=sys.stderr)
 
 
 def ignore_termination_signals() -> None:
@@ -68,7 +133,7 @@ def ignore_termination_signals() -> None:
 def main() -> int:
     args = parse_args()
     prompt = sys.stdin.buffer.read()
-    process: subprocess.Popen[bytes] | None = None
+    process: Optional[subprocess.Popen[bytes]] = None
     termination_signals = {signal.SIGHUP, signal.SIGINT, signal.SIGTERM}
     try:
         with args.stdout.open("wb") as stdout, args.stderr.open("wb") as stderr:
@@ -89,6 +154,9 @@ def main() -> int:
                         stdout=stdout,
                         stderr=stderr,
                         start_new_session=True,
+                        preexec_fn=lambda: signal.pthread_sigmask(
+                            signal.SIG_SETMASK, previous_mask
+                        ),
                     )
                 finally:
                     signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
@@ -96,8 +164,15 @@ def main() -> int:
                 process.communicate(prompt, timeout=args.timeout)
             except subprocess.TimeoutExpired:
                 ignore_termination_signals()
-                if process is not None:
-                    terminate_process_group(process)
+                try:
+                    if process is not None:
+                        terminate_process_group(process)
+                except ProcessGroupTerminationError as error:
+                    args.status.write_text("termination-failed\n", encoding="utf-8")
+                    stderr.write(
+                        f"codex-cc-triage: timeout cleanup failed: {error}\n".encode()
+                    )
+                    return 125
                 args.status.write_text("timeout\n", encoding="utf-8")
                 stderr.write(
                     f"codex-cc-triage: Claude timed out after {args.timeout} seconds\n".encode()
@@ -105,17 +180,29 @@ def main() -> int:
                 return 124
             except TerminationRequested as error:
                 ignore_termination_signals()
-                if process is not None:
-                    terminate_process_group(process)
+                try:
+                    if process is not None:
+                        terminate_process_group(process)
+                except ProcessGroupTerminationError as cleanup_error:
+                    args.status.write_text("termination-failed\n", encoding="utf-8")
+                    stderr.write(
+                        f"codex-cc-triage: signal cleanup failed: {cleanup_error}\n".encode()
+                    )
+                    return 125
                 return 128 + error.signum
             except OSError as error:
                 ignore_termination_signals()
-                if process is not None:
-                    terminate_process_group(process)
+                try:
+                    if process is not None:
+                        terminate_process_group(process)
+                except ProcessGroupTerminationError as cleanup_error:
+                    stderr.write(
+                        f"codex-cc-triage: cleanup also failed: {cleanup_error}\n".encode()
+                    )
                 stderr.write(f"codex-cc-triage: cannot run Claude: {error}\n".encode())
                 return 127
     except OSError as error:
-        print(f"codex-cc-triage: timeout runner failed: {error}", file=sys.stderr)
+        append_diagnostic(args.stderr, f"timeout runner failed: {error}")
         return 127
 
     if process is None:

@@ -136,6 +136,15 @@ else
   fail "preflight requires an exact CLI option token (rc=$rc, output=$output)"
 fi
 
+BRIDGE_ARGS=(dispatch plan plan-missing-print)
+output="$(run_bridge "Print capability preflight" env FAKE_CLAUDE_MISSING_FLAG=-p 2>&1)"
+rc=$?
+if [ "$rc" -eq 9 ] && printf '%s' "$output" | grep -q "required flag: -p"; then
+  pass "preflight requires Claude print mode"
+else
+  fail "preflight requires Claude print mode (rc=$rc, output=$output)"
+fi
+
 BRIDGE_ARGS=(dispatch plan plan-invalid-timeout)
 output="$(run_bridge "Timeout preflight" env CODEX_CC_TRIAGE_TIMEOUT_SECONDS=invalid 2>&1)"
 rc=$?
@@ -144,6 +153,27 @@ if [ "$rc" -eq 9 ] && printf '%s' "$output" | grep -q "must be a positive intege
 else
   fail "preflight rejects an invalid timeout (rc=$rc, output=$output)"
 fi
+
+BRIDGE_ARGS=(dispatch plan plan-auth-timeout)
+output="$(run_bridge "Bound auth preflight" env CODEX_CC_TRIAGE_TIMEOUT_SECONDS=1 FAKE_CLAUDE_AUTH_SLEEP_SECONDS=2 2>&1)"
+rc=$?
+if [ "$rc" -eq 9 ] && printf '%s' "$output" | grep -q "auth status timed out after 1 seconds"; then
+  pass "authentication preflight obeys the timeout"
+else
+  fail "authentication preflight obeys the timeout (rc=$rc, output=$output)"
+fi
+
+cp "$REPO/mutable.txt" "$TMP/mutable-before-preflight" || exit 1
+before_preflight_mutation="$(cat "$TMP/mutable-before-preflight")"
+BRIDGE_ARGS=(dispatch plan plan-preflight-mutation)
+output="$(run_bridge "Guard preflight mutation" env FAKE_CLAUDE_PREFLIGHT_MUTATE=1 2>&1)"
+rc=$?
+if [ "$rc" -eq 8 ] && [ "$(cat "$REPO/mutable.txt")" != "$before_preflight_mutation" ]; then
+  pass "mutation guard covers Claude preflight processes"
+else
+  fail "mutation guard covers Claude preflight processes (rc=$rc, output=$output)"
+fi
+cp "$TMP/mutable-before-preflight" "$REPO/mutable.txt" || exit 1
 
 : > "$ARGS_LOG"
 BRIDGE_ARGS=(dispatch review review-feat-billing main)

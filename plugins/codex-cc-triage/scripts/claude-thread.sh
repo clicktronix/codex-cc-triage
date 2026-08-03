@@ -21,6 +21,12 @@ TIMEOUT_STATUS=""
 PARSED_ID=""
 PARSED_RESULT=""
 PARSED_META=""
+CAPTURE_STDOUT=""
+CAPTURE_STDERR=""
+CAPTURE_STATUS=""
+BOUNDED_OUTPUT=""
+BOUNDED_ERROR=""
+BOUNDED_STATUS=""
 
 die() {
   local code="$1"
@@ -141,13 +147,32 @@ PY
 }
 
 check_runtime() {
-  local help_output auth_output missing_flag
+  local help_output auth_output missing_flag rc
   check_python_runtime
   command -v "$CLAUDE_BIN" >/dev/null 2>&1 \
     || die 9 "Claude Code CLI was not found: '$CLAUDE_BIN'"
 
-  help_output="$("$CLAUDE_BIN" --help 2>&1)" \
-    || die 9 "cannot inspect Claude Code CLI capabilities"
+  case "$TIMEOUT_SECONDS" in
+    ''|*[!0-9]*) die 9 "CODEX_CC_TRIAGE_TIMEOUT_SECONDS must be a positive integer" ;;
+  esac
+  [ "$TIMEOUT_SECONDS" -gt 0 ] \
+    || die 9 "CODEX_CC_TRIAGE_TIMEOUT_SECONDS must be a positive integer"
+
+  run_bounded_capture "$CLAUDE_BIN" --help
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    if [ "$rc" -eq 124 ] && [ "$BOUNDED_STATUS" = "timeout" ]; then
+      die 9 "Claude Code CLI capability check timed out after $TIMEOUT_SECONDS seconds"
+    fi
+    if [ "$BOUNDED_STATUS" = "termination-failed" ]; then
+      [ -z "$BOUNDED_ERROR" ] || printf '%s\n' "$BOUNDED_ERROR" >&2
+      die 9 "Claude Code CLI capability check timed out and cleanup could not be confirmed"
+    fi
+    [ -z "$BOUNDED_ERROR" ] || printf '%s\n' "$BOUNDED_ERROR" >&2
+    die 9 "cannot inspect Claude Code CLI capabilities (exit $rc)"
+  fi
+  help_output="$BOUNDED_OUTPUT
+$BOUNDED_ERROR"
   missing_flag="$(printf '%s' "$help_output" | "$PYTHON_BIN" -c '
 import re
 import sys
@@ -158,6 +183,7 @@ for flag in sys.argv[1:]:
         print(flag)
         break
 ' \
+    -p \
     --safe-mode \
     --permission-mode \
     --tools \
@@ -172,8 +198,23 @@ for flag in sys.argv[1:]:
   [ -z "$missing_flag" ] \
     || die 9 "Claude Code CLI does not support required flag: $missing_flag"
 
-  auth_output="$("$CLAUDE_BIN" auth status 2>/dev/null)" \
-    || die 9 "Claude Code is not authenticated; run 'claude auth login'"
+  run_bounded_capture "$CLAUDE_BIN" auth status
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    if [ "$rc" -eq 124 ] && [ "$BOUNDED_STATUS" = "timeout" ]; then
+      die 9 "Claude Code auth status timed out after $TIMEOUT_SECONDS seconds"
+    fi
+    if [ "$BOUNDED_STATUS" = "termination-failed" ]; then
+      [ -z "$BOUNDED_ERROR" ] || printf '%s\n' "$BOUNDED_ERROR" >&2
+      die 9 "Claude Code auth status timed out and cleanup could not be confirmed"
+    fi
+    if [ "$rc" -eq 1 ]; then
+      die 9 "Claude Code is not authenticated; run 'claude auth login'"
+    fi
+    [ -z "$BOUNDED_ERROR" ] || printf '%s\n' "$BOUNDED_ERROR" >&2
+    die 9 "cannot inspect Claude Code authentication (exit $rc)"
+  fi
+  auth_output="$BOUNDED_OUTPUT"
   printf '%s' "$auth_output" | "$PYTHON_BIN" -c '
 import json
 import sys
@@ -183,12 +224,33 @@ except (json.JSONDecodeError, OSError):
     raise SystemExit(1)
 raise SystemExit(payload.get("loggedIn") is not True)
 ' || die 9 "Claude Code auth status is invalid or not logged in"
+}
 
-  case "$TIMEOUT_SECONDS" in
-    ''|*[!0-9]*) die 9 "CODEX_CC_TRIAGE_TIMEOUT_SECONDS must be a positive integer" ;;
-  esac
-  [ "$TIMEOUT_SECONDS" -gt 0 ] \
-    || die 9 "CODEX_CC_TRIAGE_TIMEOUT_SECONDS must be a positive integer"
+run_bounded_capture() {
+  local rc
+  CAPTURE_STDOUT="$(mktemp "$STATE_DIR/.claude-preflight-out.XXXXXX")" \
+    || die 7 "cannot create preflight stdout file"
+  CAPTURE_STDERR="$(mktemp "$STATE_DIR/.claude-preflight-err.XXXXXX")" \
+    || die 7 "cannot create preflight stderr file"
+  CAPTURE_STATUS="$(mktemp "$STATE_DIR/.claude-preflight-status.XXXXXX")" \
+    || die 7 "cannot create preflight status file"
+
+  "$PYTHON_BIN" "$TIMEOUT_RUNNER" \
+    --timeout "$TIMEOUT_SECONDS" \
+    --stdout "$CAPTURE_STDOUT" \
+    --stderr "$CAPTURE_STDERR" \
+    --status "$CAPTURE_STATUS" \
+    -- "$@" </dev/null
+  rc=$?
+  BOUNDED_OUTPUT="$(cat "$CAPTURE_STDOUT" 2>/dev/null || true)"
+  BOUNDED_ERROR="$(cat "$CAPTURE_STDERR" 2>/dev/null || true)"
+  BOUNDED_STATUS="$(cat "$CAPTURE_STATUS" 2>/dev/null || true)"
+  rm -f "$CAPTURE_STDOUT" "$CAPTURE_STDERR" "$CAPTURE_STATUS" \
+    || die 7 "cannot clear preflight files"
+  CAPTURE_STDOUT=""
+  CAPTURE_STDERR=""
+  CAPTURE_STATUS=""
+  return "$rc"
 }
 
 cleanup() {
@@ -198,6 +260,9 @@ cleanup() {
   [ -z "$PARSED_ID" ] || rm -f "$PARSED_ID"
   [ -z "$PARSED_RESULT" ] || rm -f "$PARSED_RESULT"
   [ -z "$PARSED_META" ] || rm -f "$PARSED_META"
+  [ -z "$CAPTURE_STDOUT" ] || rm -f "$CAPTURE_STDOUT"
+  [ -z "$CAPTURE_STDERR" ] || rm -f "$CAPTURE_STDERR"
+  [ -z "$CAPTURE_STATUS" ] || rm -f "$CAPTURE_STATUS"
   if [ -n "$LOCK" ] && [ -f "$LOCK/pid" ] && [ "$(cat "$LOCK/pid" 2>/dev/null)" = "$$" ]; then
     rm -f "$LOCK/pid"
     rmdir "$LOCK" 2>/dev/null || true
@@ -374,7 +439,7 @@ run_claude() {
   local mode_file="$STATE_DIR/$thread.mode"
   local base_file="$STATE_DIR/$thread.base"
   local context_file="$STATE_DIR/$thread.context.md"
-  local existing_id existing_mode comparison stored_base resolved_target snapshot_start before
+  local existing_id existing_mode comparison stored_base resolved_target snapshot_start after_preflight before
   local role_prompt full_prompt
   local claude_rc after parse_rc returned_id result metadata
   existing_id="$(cat "$id_file" 2>/dev/null || true)"
@@ -394,10 +459,16 @@ run_claude() {
 
   atomic_write "$mode_file" "$mode"
 
-  check_runtime
-
   snapshot_start="$("$PYTHON_BIN" "$SNAPSHOT" fingerprint --root "$ROOT" --state-rel "$STATE_REL")" \
     || die 7 "failed to fingerprint repository"
+
+  check_runtime
+
+  after_preflight="$("$PYTHON_BIN" "$SNAPSHOT" fingerprint --root "$ROOT" --state-rel "$STATE_REL")" \
+    || die 7 "failed to fingerprint repository after Claude preflight"
+  if [ "$snapshot_start" != "$after_preflight" ]; then
+    die 8 "repository changed during Claude preflight; retry from a stable worktree"
+  fi
 
   comparison=""
   if [ "$mode" = "review" ]; then
@@ -521,6 +592,10 @@ $prompt"
     if [ "$claude_rc" -eq 124 ] \
       && [ "$(cat "$TIMEOUT_STATUS" 2>/dev/null)" = "timeout" ]; then
       die 3 "Claude timed out after $TIMEOUT_SECONDS seconds; inspect $STATE_REL/$thread.last-error.*"
+    fi
+    if [ "$claude_rc" -eq 125 ] \
+      && [ "$(cat "$TIMEOUT_STATUS" 2>/dev/null)" = "termination-failed" ]; then
+      die 3 "Claude timeout cleanup could not confirm process-group termination; inspect $STATE_REL/$thread.last-error.*"
     fi
     die 3 "Claude exited $claude_rc; inspect $STATE_REL/$thread.last-error.*"
   fi

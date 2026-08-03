@@ -2,7 +2,14 @@
 set -u
 
 if [ "${1:-}" = "--help" ]; then
+  if [ -n "${FAKE_CLAUDE_HELP_SLEEP_SECONDS:-}" ]; then
+    sleep "$FAKE_CLAUDE_HELP_SLEEP_SECONDS"
+  fi
+  if [ "${FAKE_CLAUDE_PREFLIGHT_MUTATE:-0}" = "1" ]; then
+    printf 'mutated during preflight\n' >> "${FAKE_CLAUDE_PROJECT_DIR:?}/mutable.txt"
+  fi
   for flag in \
+    -p \
     --safe-mode \
     --permission-mode \
     --tools \
@@ -23,6 +30,9 @@ if [ "${1:-}" = "--help" ]; then
 fi
 
 if [ "${1:-}" = "auth" ] && [ "${2:-}" = "status" ]; then
+  if [ -n "${FAKE_CLAUDE_AUTH_SLEEP_SECONDS:-}" ]; then
+    sleep "$FAKE_CLAUDE_AUTH_SLEEP_SECONDS"
+  fi
   if [ "${FAKE_CLAUDE_AUTHENTICATED:-1}" = "1" ]; then
     printf '{"loggedIn":true,"authMethod":"test"}\n'
     exit 0

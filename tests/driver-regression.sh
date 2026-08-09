@@ -58,6 +58,7 @@ mkdir -p "$REPO"
   printf 'unstaged feature\n' >> tracked.txt
   printf 'new file\n' > untracked.txt
 ) || exit 1
+export CODEX_CC_TRIAGE_STATE_DIR="$REPO/$STATE_REL"
 EXCLUDE_BEFORE="$(cat "$REPO/.git/info/exclude" 2>/dev/null || true)"
 MAIN_BASE="$(git -C "$REPO" rev-parse main)"
 
@@ -415,6 +416,7 @@ fi
 
 ORIGINAL_REPO="$REPO"
 REPO="$TMP/head-repo"
+export CODEX_CC_TRIAGE_STATE_DIR="$REPO/$STATE_REL"
 mkdir -p "$REPO"
 (
   cd "$REPO" || exit 1
@@ -439,6 +441,7 @@ else
   fail "HEAD fallback pins the original review base commit (rc=$rc, base=$stored_base, output=$output)"
 fi
 REPO="$ORIGINAL_REPO"
+export CODEX_CC_TRIAGE_STATE_DIR="$REPO/$STATE_REL"
 
 BRIDGE_ARGS=(dispatch review review-too-large main)
 output="$(run_bridge "Review bounded context" env CODEX_CC_TRIAGE_CONTEXT_LIMIT=256 2>&1)"
@@ -487,6 +490,7 @@ mkdir -p "$SYMLINK_REPO" "$SYMLINK_TARGET"
   ln -s "$SYMLINK_TARGET" .agent-state
 ) || exit 1
 REPO="$SYMLINK_REPO"
+export CODEX_CC_TRIAGE_STATE_DIR="$REPO/$STATE_REL"
 BRIDGE_ARGS=(dispatch plan plan-symlink)
 output="$(run_bridge "Reject symlink" env 2>&1)"
 rc=$?
@@ -496,5 +500,6 @@ else
   fail "symlinked state parent is rejected (rc=$rc, output=$output)"
 fi
 REPO="$ORIGINAL_REPO"
+export CODEX_CC_TRIAGE_STATE_DIR="$REPO/$STATE_REL"
 
 exit "$failures"

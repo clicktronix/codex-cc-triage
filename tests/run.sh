@@ -5,7 +5,10 @@ ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 
 for script in \
   "$ROOT/plugins/codex-cc-triage/scripts/claude-thread.sh" \
+  "$ROOT/plugins/codex-cc-triage/scripts/review-state.sh" \
+  "$ROOT/plugins/codex-cc-triage/scripts/state-dir.sh" \
   "$ROOT/tests/driver-regression.sh" \
+  "$ROOT/tests/review-contract-regression.sh" \
   "$ROOT/tests/structure-regression.sh" \
   "$ROOT/tests/timeout-runner-regression.sh" \
   "$ROOT/tests/fixtures/fake-claude.sh"; do
@@ -20,6 +23,7 @@ python3 -m py_compile \
   "$ROOT/tests/test_timeout_runner.py"
 
 bash "$ROOT/tests/driver-regression.sh"
+bash "$ROOT/tests/review-contract-regression.sh"
 python3 "$ROOT/tests/validate_structure.py"
 bash "$ROOT/tests/structure-regression.sh"
 bash "$ROOT/tests/timeout-runner-regression.sh"

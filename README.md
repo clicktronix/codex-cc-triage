@@ -3,8 +3,9 @@
 A Codex plugin for persistent, read-only second opinions from Claude Code.
 
 Use it to ask one bounded technical question, stress-test a plan, review a complete branch diff,
-and ask follow-up questions in the same Claude session. Threads are task-scoped and stored locally
-under `.agent-state/codex-cc-triage/`.
+and ask follow-up questions in the same Claude session. It also exposes a machine-verified required
+review for owning delivery workflows. Task-scoped threads live in the repository common Git directory
+so they survive disposable-worktree cleanup.
 
 ## Install
 
@@ -23,6 +24,7 @@ Start a new Codex thread after installation, then invoke a skill explicitly:
 $codex-cc-triage:claude-second-opinion ask Claude which module should own this boundary
 $codex-cc-triage:claude-plan stress-test docs/plans/new-billing-flow.md
 $codex-cc-triage:claude-review review this branch against main for correctness and regressions
+$codex-cc-triage:claude-review --required --base <sha> --spec <path> --thread review-<run-id> --cap 5 review this exact candidate
 $codex-cc-triage:claude-reply <thread-from-review-output> re-evaluate after my fixes
 $codex-cc-triage:claude-thread status
 $codex-cc-triage:claude-thread new <thread-from-output>
@@ -45,6 +47,10 @@ worktree mutation and fails the call. Before each dispatch, the wrapper verifies
 Claude CLI flags, and `claude auth status` through the same bounded process runner; incompatible,
 unauthenticated, or hung installations fail before repository content is sent.
 
+Required review records `APPROVE` only when Claude's foreground result, dispatch fingerprint,
+candidate HEAD/tree, canonical base, and tracked spec all match. `REQUEST_CHANGES`, a missing verdict,
+candidate movement, timeout, cap, or tool failure emits no approval marker.
+
 Review context is bounded. If the complete diff does not fit, the driver fails before invoking
 Claude instead of silently omitting later files. Split the change or raise the context limit
 deliberately.
@@ -54,8 +60,12 @@ timeouts and CLI failures preserve stderr and any partial JSON under the named t
 preflight failures are reported synchronously and remain visible as failed thread state.
 
 The inspected repository content is sent through your configured Claude Code account. Local thread
-IDs, prompts, results, and diagnostics remain in `.agent-state/codex-cc-triage/`. Its internal
-`.gitignore` keeps the directory out of Git without modifying protected `.git/` metadata.
+IDs, prompts, results, diagnostics, and required-review state remain under
+`<git-common-dir>/codex-cc-triage/threads/`, outside the worktree and Git index. `state-dir.sh` migrates
+legacy `.agent-state/codex-cc-triage/` state on the first mutating call without deleting the legacy
+copy. The generated bounded context file alone remains in the current worktree's self-ignored
+`.agent-state/codex-cc-triage/` directory so Claude's read-only tools can open it; it is disposable and
+is not approval state.
 
 ## Configuration
 

@@ -7,6 +7,7 @@ SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
 SNAPSHOT="$SCRIPT_DIR/repo_snapshot.py"
 PARSER="$SCRIPT_DIR/parse_claude_json.py"
 TIMEOUT_RUNNER="$SCRIPT_DIR/run_with_timeout.py"
+STATE_HELPER="$SCRIPT_DIR/state-dir.sh"
 STATE_REL=".agent-state/codex-cc-triage"
 ROOT="${CODEX_CC_TRIAGE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || true)}"
 CLAUDE_BIN="${CODEX_CC_TRIAGE_CLAUDE_BIN:-claude}"
@@ -42,51 +43,60 @@ ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || die 7 "cannot resolve rep
 cd "$ROOT" 2>/dev/null || die 7 "cannot enter repository root '$ROOT'"
 ROOT="$(pwd -P)" || die 7 "cannot canonicalize repository root"
 
-STATE_DIR="$ROOT/$STATE_REL"
+STATE_DIR=""
+CONTEXT_DIR="$ROOT/$STATE_REL"
 
 prepare_state_dir() {
-  local parent="$ROOT/.agent-state"
-  local ignore_file="$STATE_DIR/.gitignore"
-  local resolved tracked temporary
-
-  [ ! -L "$parent" ] || die 7 "refusing symlinked state parent: $parent"
-  [ ! -e "$parent" ] || [ -d "$parent" ] || die 7 "state parent is not a directory: $parent"
-  mkdir -p "$parent" || die 7 "cannot create state parent '$parent'"
-
+  local tracked ignore_file temporary
+  STATE_DIR="$(bash "$STATE_HELPER")" \
+    || die 7 "cannot resolve persistent thread state"
   [ ! -L "$STATE_DIR" ] || die 7 "refusing symlinked state directory: $STATE_DIR"
-  [ ! -e "$STATE_DIR" ] || [ -d "$STATE_DIR" ] || die 7 "state path is not a directory: $STATE_DIR"
-  mkdir -p "$STATE_DIR" || die 7 "cannot create state directory '$STATE_DIR'"
-
-  resolved="$(CDPATH='' cd -- "$STATE_DIR" 2>/dev/null && pwd -P)" \
-    || die 7 "cannot canonicalize state directory"
-  case "$resolved" in
-    "$ROOT"/*) ;;
-    *) die 7 "state directory escapes repository: $resolved" ;;
-  esac
-
+  [ -d "$STATE_DIR" ] || die 7 "state path is not a directory: $STATE_DIR"
+  [ ! -L "$ROOT/.agent-state" ] || die 7 "refusing symlinked context parent"
+  [ ! -L "$CONTEXT_DIR" ] || die 7 "refusing symlinked context directory"
+  [ ! -e "$CONTEXT_DIR" ] || [ -d "$CONTEXT_DIR" ] \
+    || die 7 "context path is not a directory: $CONTEXT_DIR"
   tracked="$(git ls-files -- "$STATE_REL" 2>/dev/null)" \
-    || die 7 "cannot inspect tracked state paths"
-  [ -z "$tracked" ] || die 7 "refusing tracked state directory: $STATE_REL"
-  [ ! -L "$ignore_file" ] || die 7 "refusing symlinked state ignore file"
+    || die 7 "cannot inspect tracked context paths"
+  [ -z "$tracked" ] || die 7 "refusing tracked context directory: $STATE_REL"
+  mkdir -p "$CONTEXT_DIR" || die 7 "cannot create context directory"
+  ignore_file="$CONTEXT_DIR/.gitignore"
+  [ ! -L "$ignore_file" ] || die 7 "refusing symlinked context ignore file"
   [ ! -e "$ignore_file" ] || [ -f "$ignore_file" ] \
-    || die 7 "state ignore path is not a regular file"
+    || die 7 "context ignore path is not a regular file"
   if ! grep -qxF '*' "$ignore_file" 2>/dev/null; then
-    temporary="$ignore_file.tmp.$$"
-    printf '*\n' > "$temporary" || die 7 "cannot write state ignore file"
-    mv "$temporary" "$ignore_file" || die 7 "cannot install state ignore file"
+    temporary="$(mktemp "$ignore_file.tmp.XXXXXX")" \
+      || die 7 "cannot create context ignore temp file"
+    printf '*\n' > "$temporary" \
+      && mv -f "$temporary" "$ignore_file" \
+      || { rm -f "$temporary" 2>/dev/null; die 7 "cannot ignore context directory"; }
   fi
-  git check-ignore -q "$STATE_REL/probe" 2>/dev/null \
-    || die 7 "state directory is not ignored: $STATE_REL"
 }
 
 assert_thread_files_safe() {
   local thread="$1"
   local suffix path
-  for suffix in id mode base log context.md failed last-error.json last-error.stderr last-stderr; do
+  for suffix in id mode base log last-prompt last-result last-fingerprint \
+      candidate review-state review-loop approved failed last-error.json last-error.stderr last-stderr; do
     path="$STATE_DIR/$thread.$suffix"
     [ ! -L "$path" ] || die 7 "refusing symlinked thread state: $path"
     [ ! -e "$path" ] || [ -f "$path" ] || die 7 "thread state is not a regular file: $path"
   done
+  path="$STATE_DIR/$thread.review-lock"
+  [ ! -L "$path" ] || die 7 "refusing symlinked required-review lock: $path"
+  [ ! -e "$path" ] || [ -d "$path" ] \
+    || die 7 "required-review lock is not a directory: $path"
+  [ ! -e "$path/owner" ] || { [ ! -L "$path/owner" ] && [ -f "$path/owner" ]; } \
+    || die 7 "required-review lock owner is unsafe: $path/owner"
+  path="$STATE_DIR/$thread.review-lock-reclaim"
+  [ ! -L "$path" ] || die 7 "refusing symlinked required-review reclaim lock: $path"
+  [ ! -e "$path" ] || [ -d "$path" ] \
+    || die 7 "required-review reclaim lock is not a directory: $path"
+  [ ! -e "$path/owner" ] || { [ ! -L "$path/owner" ] && [ -f "$path/owner" ]; } \
+    || die 7 "required-review reclaim lock owner is unsafe: $path/owner"
+  path="$CONTEXT_DIR/$thread.context.md"
+  [ ! -L "$path" ] || die 7 "refusing symlinked review context: $path"
+  [ ! -e "$path" ] || [ -f "$path" ] || die 7 "review context is not a regular file: $path"
 }
 
 validate_thread() {
@@ -363,12 +373,23 @@ reset_thread() {
   validate_thread "$thread"
   assert_thread_files_safe "$thread"
   acquire_lock "$thread"
+  [ ! -e "$STATE_DIR/$thread.review-lock" ] \
+    || die 10 "required-review state is active: $thread"
+  [ ! -e "$STATE_DIR/$thread.review-lock-reclaim" ] \
+    || die 10 "required-review reclamation is active: $thread"
   rm -f \
     "$STATE_DIR/$thread.id" \
     "$STATE_DIR/$thread.mode" \
     "$STATE_DIR/$thread.base" \
     "$STATE_DIR/$thread.log" \
-    "$STATE_DIR/$thread.context.md" \
+    "$CONTEXT_DIR/$thread.context.md" \
+    "$STATE_DIR/$thread.last-prompt" \
+    "$STATE_DIR/$thread.last-result" \
+    "$STATE_DIR/$thread.last-fingerprint" \
+    "$STATE_DIR/$thread.candidate" \
+    "$STATE_DIR/$thread.review-state" \
+    "$STATE_DIR/$thread.review-loop" \
+    "$STATE_DIR/$thread.approved" \
     "$STATE_DIR/$thread.failed" \
     "$STATE_DIR/$thread.last-error.json" \
     "$STATE_DIR/$thread.last-error.stderr" \
@@ -408,11 +429,12 @@ append_log() {
   local thread="$1"
   local mode="$2"
   local prompt="$3"
-  local result="$4"
+  local metadata="$4"
+  local result="$5"
   {
     printf '\n## %s mode=%s\n\n' "$(date -u +%FT%TZ)" "$mode"
     printf '### prompt\n\n%s\n\n' "$prompt"
-    printf '### response\n\n%s\n' "$result"
+    printf '### response\n\n%s\n\n### metadata\n\n%s\n' "$result" "$metadata"
   } >> "$STATE_DIR/$thread.log" || die 7 "cannot append thread log"
 }
 
@@ -438,7 +460,7 @@ run_claude() {
   local id_file="$STATE_DIR/$thread.id"
   local mode_file="$STATE_DIR/$thread.mode"
   local base_file="$STATE_DIR/$thread.base"
-  local context_file="$STATE_DIR/$thread.context.md"
+  local context_file="$CONTEXT_DIR/$thread.context.md"
   local existing_id existing_mode comparison stored_base resolved_target snapshot_start after_preflight before
   local role_prompt full_prompt
   local claude_rc after parse_rc returned_id result metadata
@@ -584,20 +606,20 @@ $prompt"
     || die 7 "failed to fingerprint repository after Claude"
   if [ "$before" != "$after" ]; then
     persist_failure "$thread" "$mode"
-    die 5 "Claude changed repository state; inspect the worktree and $STATE_REL/$thread.last-error.*"
+    die 5 "Claude changed repository state; inspect the worktree and $STATE_DIR/$thread.last-error.*"
   fi
 
   if [ "$claude_rc" -ne 0 ]; then
     persist_failure "$thread" "$mode"
     if [ "$claude_rc" -eq 124 ] \
       && [ "$(cat "$TIMEOUT_STATUS" 2>/dev/null)" = "timeout" ]; then
-      die 3 "Claude timed out after $TIMEOUT_SECONDS seconds; inspect $STATE_REL/$thread.last-error.*"
+      die 3 "Claude timed out after $TIMEOUT_SECONDS seconds; inspect $STATE_DIR/$thread.last-error.*"
     fi
     if [ "$claude_rc" -eq 125 ] \
       && [ "$(cat "$TIMEOUT_STATUS" 2>/dev/null)" = "termination-failed" ]; then
-      die 3 "Claude timeout cleanup could not confirm process-group termination; inspect $STATE_REL/$thread.last-error.*"
+      die 3 "Claude timeout cleanup could not confirm process-group termination; inspect $STATE_DIR/$thread.last-error.*"
     fi
-    die 3 "Claude exited $claude_rc; inspect $STATE_REL/$thread.last-error.*"
+    die 3 "Claude exited $claude_rc; inspect $STATE_DIR/$thread.last-error.*"
   fi
 
   "$PYTHON_BIN" "$PARSER" \
@@ -608,7 +630,7 @@ $prompt"
   parse_rc=$?
   if [ "$parse_rc" -ne 0 ]; then
     persist_failure "$thread" "$mode"
-    die 4 "could not parse Claude output; inspect $STATE_REL/$thread.last-error.*"
+    die 4 "could not parse Claude output; inspect $STATE_DIR/$thread.last-error.*"
   fi
 
   returned_id="$(cat "$PARSED_ID")"
@@ -624,10 +646,13 @@ $prompt"
   fi
   atomic_write "$mode_file" "$mode"
   atomic_write "$id_file" "$returned_id"
+  atomic_write "$STATE_DIR/$thread.last-prompt" "$prompt"
+  atomic_write "$STATE_DIR/$thread.last-result" "$result"
+  atomic_write "$STATE_DIR/$thread.last-fingerprint" "$before"
   if [ -s "$STDERR_FILE" ]; then
     cp "$STDERR_FILE" "$STATE_DIR/$thread.last-stderr" \
       || die 7 "cannot persist Claude stderr"
-    echo "codex-cc-triage: Claude emitted stderr; saved to $STATE_REL/$thread.last-stderr" >&2
+    echo "codex-cc-triage: Claude emitted stderr; saved to $STATE_DIR/$thread.last-stderr" >&2
   else
     rm -f "$STATE_DIR/$thread.last-stderr" \
       || die 7 "cannot clear previous Claude stderr"
@@ -637,9 +662,7 @@ $prompt"
     "$STATE_DIR/$thread.last-error.json" \
     "$STATE_DIR/$thread.last-error.stderr" \
     || die 7 "cannot clear previous Claude failure state"
-  append_log "$thread" "$mode" "$prompt" "$metadata
-
-$result"
+  append_log "$thread" "$mode" "$prompt" "$metadata" "$result"
 
   printf '[Claude thread: %s | session: %s | %s]\n\n%s\n' \
     "$thread" "$returned_id" "$metadata" "$result"

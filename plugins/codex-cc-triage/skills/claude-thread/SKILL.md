@@ -22,5 +22,6 @@ bash "<plugin-root>/scripts/claude-thread.sh" name "<ask|plan|review>" "<task-la
   `$codex-cc-triage:claude-second-opinion`, `$codex-cc-triage:claude-plan`, or
   `$codex-cc-triage:claude-review` call with that name starts a fresh Claude session.
 - Never reset a thread while another call owns its active lock. The driver returns exit 10.
-- Thread state is local under `.agent-state/codex-cc-triage/` and ignored by its own `.gitignore`,
-  but may contain prompts and review output. Do not commit it with `git add -f`.
+- Thread and required-review state lives under the repository common Git directory reported by
+  `scripts/state-dir.sh`, survives disposable-worktree removal, and may contain prompts and review
+  output. It is outside the worktree and Git index; do not copy it into committed files.

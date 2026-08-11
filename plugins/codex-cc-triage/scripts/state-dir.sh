@@ -9,6 +9,10 @@
 set -u
 umask 077
 
+SELF_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
+# shellcheck source=lock-lib.sh
+. "$SELF_DIR/lock-lib.sh"
+
 READ_ONLY=false
 case "${1:-}" in
   "") ;;
@@ -22,24 +26,9 @@ if ! ROOT="$(git -C "${CODEX_CC_TRIAGE_PROJECT_DIR:-$PWD}" rev-parse --show-topl
 fi
 cd "$ROOT" || exit 7
 
-link_count() {
-  count="$(stat -c '%h' "$1" 2>/dev/null)" && [ -n "$count" ] \
-    && { printf '%s' "$count"; return 0; }
-  stat -f '%l' "$1" 2>/dev/null
-}
 assert_single_link() {
-  attempts=0
-  while [ "$attempts" -lt 3 ]; do
-    if links="$(link_count "$1")"; then
-      [ "$links" = 1 ] || { echo "refusing multiply-linked state: $1" >&2; exit 7; }
-      return 0
-    fi
-    [ ! -e "$1" ] && [ ! -L "$1" ] && return 0
-    attempts=$((attempts + 1))
-    sleep 0.01 2>/dev/null || sleep 1
-  done
-  echo "cannot inspect state link count: $1" >&2
-  exit 7
+  codex_cc_lock_assert_single_link "$1" \
+    || { echo "refusing unsafe or multiply-linked state: $1" >&2; exit 7; }
 }
 assert_regular_or_missing() {
   inspected="$1"; label="$2"
@@ -198,79 +187,30 @@ mkdir -p "$PARENT" || exit 1
 [ ! -L "$STATE_DIR" ] || { echo "refusing symlinked thread directory" >&2; exit 7; }
 LOCK="$PARENT/migration.lock"
 RECLAIM_LOCK="$PARENT/migration-reclaim.lock"
-mtime_epoch() {
-  v="$(stat -c '%Y' "$1" 2>/dev/null)" && [ -n "$v" ] && { printf '%s' "$v"; return 0; }
-  stat -f '%m' "$1" 2>/dev/null
-}
 assert_lock_safe() {
   lock_path="$1"
   assert_directory_or_missing "$lock_path" "state-dir.sh: lock"
   assert_regular_or_missing "$lock_path/owner" "state-dir.sh: lock owner"
 }
 remove_owned_lock() {
-  lock_path="$1"
-  [ ! -L "$lock_path" ] || return 0
-  [ -d "$lock_path" ] || return 0
-  [ ! -L "$lock_path/owner" ] || return 0
-  [ "$(cat "$lock_path/owner" 2>/dev/null)" = "$$" ] || return 0
-  rm -f "$lock_path/owner" 2>/dev/null
-  rmdir "$lock_path" 2>/dev/null || true
+  codex_cc_lock_release_owned "$1" owner "$$"
 }
 cleanup_migration_locks() {
   remove_owned_lock "$RECLAIM_LOCK"
   remove_owned_lock "$LOCK"
 }
 lock_is_stale() {
-  candidate_lock="$1"; candidate_owner="$(cat "$candidate_lock/owner" 2>/dev/null)"
-  case "$candidate_owner" in
-    '')
-      now="$(date +%s 2>/dev/null)"; mt="$(mtime_epoch "$candidate_lock")"
-      case "$now:$mt" in :*|*:|*[!0-9:]*) return 1 ;; esac
-      [ $((now - mt)) -gt 60 ]
-      ;;
-    0|0[0-9]*|*[!0-9]*) return 0 ;;
-    *)
-      [ "${#candidate_owner}" -le 12 ] || return 0
-      kill -0 "$candidate_owner" 2>/dev/null && return 1
-      return 0
-      ;;
-  esac
+  codex_cc_lock_is_stale "$1" owner
 }
 acquire_reclaim_lock() {
-  reclaim_tries=0
-  while [ "$reclaim_tries" -lt 100 ]; do
-    assert_lock_safe "$RECLAIM_LOCK"
-    if mkdir "$RECLAIM_LOCK" 2>/dev/null; then
-      if (set -C; printf '%s\n' "$$" > "$RECLAIM_LOCK/owner") 2>/dev/null \
-          && [ "$(cat "$RECLAIM_LOCK/owner" 2>/dev/null)" = "$$" ]; then
-        return 0
-      fi
-      return 1
-    fi
-    if lock_is_stale "$RECLAIM_LOCK"; then
-      sampled_owner="$(cat "$RECLAIM_LOCK/owner" 2>/dev/null)"
-      stale_reclaim="$RECLAIM_LOCK.stale.$$.$reclaim_tries"
-      [ ! -e "$stale_reclaim" ] && [ ! -L "$stale_reclaim" ] || return 1
-      if mv "$RECLAIM_LOCK" "$stale_reclaim" 2>/dev/null; then
-        moved_owner="$(cat "$stale_reclaim/owner" 2>/dev/null)"
-        if [ "$moved_owner" != "$sampled_owner" ]; then
-          if [ ! -e "$RECLAIM_LOCK" ] && [ ! -L "$RECLAIM_LOCK" ]; then
-            mv "$stale_reclaim" "$RECLAIM_LOCK" 2>/dev/null || true
-          else
-            rm -f "$stale_reclaim/owner" 2>/dev/null
-            rmdir "$stale_reclaim" 2>/dev/null || true
-          fi
-          return 1
-        fi
-        rm -f "$stale_reclaim/owner" 2>/dev/null
-        rmdir "$stale_reclaim" 2>/dev/null || true
-        reclaim_tries=$((reclaim_tries + 1))
-        continue
-      fi
-    fi
-    return 1
-  done
-  return 1
+  local rc
+  codex_cc_lock_acquire_reclaim "$RECLAIM_LOCK" owner "$$" 100
+  rc=$?
+  if [ "$rc" -eq 7 ]; then
+    echo "state-dir.sh: unsafe migration reclaim lock" >&2
+    exit 7
+  fi
+  return "$rc"
 }
 trap cleanup_migration_locks EXIT
 trap 'exit 129' HUP

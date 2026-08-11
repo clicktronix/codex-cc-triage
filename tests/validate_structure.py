@@ -78,8 +78,8 @@ def main() -> int:
     if manifest.get("name") != "codex-cc-triage":
         fail("plugin name mismatch")
         failures += 1
-    if manifest.get("version") != "0.4.0":
-        fail("plugin version must be 0.4.0")
+    if manifest.get("version") != "0.5.0":
+        fail("plugin version must be 0.5.0")
         failures += 1
     if manifest.get("skills") != "./skills/":
         fail("plugin skills path must be ./skills/")

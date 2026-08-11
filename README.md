@@ -24,7 +24,7 @@ Start a new Codex thread after installation, then invoke a skill explicitly:
 $codex-cc-triage:claude-second-opinion ask Claude which module should own this boundary
 $codex-cc-triage:claude-plan stress-test docs/plans/new-billing-flow.md
 $codex-cc-triage:claude-review review this branch against main for correctness and regressions
-$codex-cc-triage:claude-review --required --base <sha> --spec <path> --thread review-<run-id> --cap 5 review this exact candidate
+$codex-cc-triage:claude-review --required --base <sha> --spec <path> --thread <thread> --cap 5 review this exact candidate
 $codex-cc-triage:claude-reply <thread-from-review-output> re-evaluate after my fixes
 $codex-cc-triage:claude-thread status
 $codex-cc-triage:claude-thread new <thread-from-output>
@@ -32,9 +32,10 @@ $codex-cc-triage:claude-thread new <thread-from-output>
 
 All skills require explicit `$codex-cc-triage:<skill>` invocation. The question, plan, and review
 skills ask the driver to normalize a task label or current feature branch into a collision-resistant
-ASCII thread name. Re-running a skill with the same thread resumes the existing Claude session
-instead of starting over. A review thread pins its integration target to the exact commit from the
-first round; if a named target such as `main` moves, start a new review thread for the new base.
+ASCII thread name of at most 80 characters. Re-running a skill with the same thread resumes the
+existing Claude session instead of starting over. A review thread pins its integration target to the
+exact commit from the first round; if a named target such as `main` moves, start a new review thread
+for the new base.
 
 ## Safety Boundary
 
@@ -104,7 +105,7 @@ Version 0.4 adds bounded technical questions, deterministic thread naming, CLI/a
 preflight checks, wall-clock timeouts, failed-thread visibility, explicit-invocation regression
 coverage, and Linux/macOS CI.
 
-The next release hardens required review with per-attempt claims, exact dispatch attribution,
+Version 0.5 hardens required review with per-attempt claims, exact dispatch attribution,
 pinned lifecycle contracts, explicit abort/reset/terminal states, granular stale diagnostics, and
 required-state visibility in thread status.
 

@@ -70,6 +70,27 @@ else
 fi
 
 echo "== exact clean candidate approval =="
+LONG_THREAD="$(printf 'a%.0s' $(seq 1 81))"
+reviewctl begin "$LONG_THREAD" --base "$BASE" --spec docs/spec.md --cap 5 >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 2 ] && [ ! -e "$STATE/$LONG_THREAD.candidate" ] \
+  && ok "required-review thread length matches the driver" \
+  || bad "required-review accepted a thread longer than the driver"
+for duplicate_case in \
+  "base|--base does-not-exist --base $BASE --spec docs/spec.md --cap 5" \
+  "spec|--base $BASE --spec missing.md --spec docs/spec.md --cap 5" \
+  "cap|--base $BASE --spec docs/spec.md --cap 1 --cap 5"; do
+  duplicate_name="${duplicate_case%%|*}"
+  duplicate_args="${duplicate_case#*|}"
+  # shellcheck disable=SC2086 -- the fixture intentionally expands one argument vector.
+  reviewctl begin duplicate-run $duplicate_args >/dev/null 2>&1; rc=$?
+  if [ "$rc" -eq 2 ] && [ ! -e "$STATE/duplicate-run.candidate" ]; then
+    ok "duplicate --$duplicate_name fails closed"
+  else
+    bad "duplicate --$duplicate_name was accepted"
+    reviewctl reset duplicate-run >/dev/null 2>&1 || true
+  fi
+done
+
 begin_required review-run-1 --base "$BASE" --spec docs/spec.md --cap 5
 dispatch APPROVE "$(required_prompt)"
 OUT="$(record_required review-run-1 2>&1)"; rc=$?

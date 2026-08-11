@@ -12,6 +12,8 @@ set -u
 umask 077
 
 SELF_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
+# shellcheck source=lock-lib.sh
+. "$SELF_DIR/lock-lib.sh"
 STATE_HELPER="$SELF_DIR/state-dir.sh"
 SNAPSHOT="$SELF_DIR/repo_snapshot.py"
 PYTHON_BIN="${CODEX_CC_TRIAGE_PYTHON_BIN:-python3}"
@@ -23,6 +25,7 @@ usage() {
 
 VERB="${1:-}"; THREAD="${2:-}"
 [ -n "$VERB" ] && [ -n "$THREAD" ] || usage
+[ "${#THREAD}" -le 80 ] || die 2 "thread name exceeds 80 characters"
 case "$THREAD" in
   [A-Za-z0-9]*) ;;
   *) die 2 "thread name must start with an ASCII letter or digit" ;;
@@ -59,23 +62,9 @@ atomic_write() {
   rm -f "$temporary" 2>/dev/null
   return 1
 }
-link_count() {
-  count="$(stat -c '%h' "$1" 2>/dev/null)" && [ -n "$count" ] \
-    && { printf '%s' "$count"; return 0; }
-  stat -f '%l' "$1" 2>/dev/null
-}
 assert_single_link() {
-  attempts=0
-  while [ "$attempts" -lt 3 ]; do
-    if links="$(link_count "$1")"; then
-      [ "$links" = 1 ] || die 7 "refusing multiply-linked required-review state: $1"
-      return 0
-    fi
-    [ ! -e "$1" ] && [ ! -L "$1" ] && return 0
-    attempts=$((attempts + 1))
-    sleep 0.01 2>/dev/null || sleep 1
-  done
-  die 7 "cannot inspect state link count: $1"
+  codex_cc_lock_assert_single_link "$1" \
+    || die 7 "refusing unsafe or multiply-linked required-review state: $1"
 }
 assert_regular_or_missing() {
   inspected="$1"; label="$2"
@@ -115,78 +104,21 @@ assert_reclaim_lock_safe() {
   assert_directory_or_missing "$RECLAIM_LOCK" "review reclaim lock"
   assert_regular_or_missing "$RECLAIM_LOCK/owner" "review reclaim lock owner"
 }
-lock_mtime_epoch() {
-  value="$(stat -c '%Y' "$1" 2>/dev/null)" && [ -n "$value" ] \
-    && { printf '%s' "$value"; return 0; }
-  stat -f '%m' "$1" 2>/dev/null
-}
 remove_owned_review_lock() {
-  [ ! -L "$REVIEW_LOCK" ] || return 0
-  [ -d "$REVIEW_LOCK" ] || return 0
-  [ ! -L "$REVIEW_LOCK/owner" ] || return 0
-  [ "$(cat "$REVIEW_LOCK/owner" 2>/dev/null)" = "$$" ] || return 0
-  rm -f "$REVIEW_LOCK/owner" 2>/dev/null
-  rmdir "$REVIEW_LOCK" 2>/dev/null || true
+  codex_cc_lock_release_owned "$REVIEW_LOCK" owner "$$"
 }
 remove_owned_reclaim_lock() {
-  [ ! -L "$RECLAIM_LOCK" ] || return 0
-  [ -d "$RECLAIM_LOCK" ] || return 0
-  [ ! -L "$RECLAIM_LOCK/owner" ] || return 0
-  [ "$(cat "$RECLAIM_LOCK/owner" 2>/dev/null)" = "$$" ] || return 0
-  rm -f "$RECLAIM_LOCK/owner" 2>/dev/null
-  rmdir "$RECLAIM_LOCK" 2>/dev/null || true
+  codex_cc_lock_release_owned "$RECLAIM_LOCK" owner "$$"
 }
 lock_is_stale() {
-  candidate_lock="$1"; candidate_owner="$(cat "$candidate_lock/owner" 2>/dev/null)"
-  case "$candidate_owner" in
-    '')
-      now="$(date +%s 2>/dev/null)"; modified="$(lock_mtime_epoch "$candidate_lock")"
-      case "$now:$modified" in :*|*:|*[!0-9:]*) return 1 ;; esac
-      [ $((now - modified)) -gt 60 ]
-      ;;
-    0|0[0-9]*|*[!0-9]*) return 0 ;;
-    *)
-      [ "${#candidate_owner}" -le 12 ] || return 0
-      kill -0 "$candidate_owner" 2>/dev/null && return 1
-      return 0
-      ;;
-  esac
+  codex_cc_lock_is_stale "$1" owner
 }
 acquire_reclaim_lock() {
-  tries=0
-  while [ "$tries" -lt 100 ]; do
-    assert_reclaim_lock_safe
-    if mkdir "$RECLAIM_LOCK" 2>/dev/null; then
-      if (set -C; printf '%s\n' "$$" > "$RECLAIM_LOCK/owner") 2>/dev/null \
-          && [ "$(cat "$RECLAIM_LOCK/owner" 2>/dev/null)" = "$$" ]; then
-        return 0
-      fi
-      return 1
-    fi
-    if lock_is_stale "$RECLAIM_LOCK"; then
-      sampled="$(cat "$RECLAIM_LOCK/owner" 2>/dev/null)"
-      stale_reclaim="$RECLAIM_LOCK.stale.$$.$tries"
-      [ ! -e "$stale_reclaim" ] && [ ! -L "$stale_reclaim" ] || return 1
-      if mv "$RECLAIM_LOCK" "$stale_reclaim" 2>/dev/null; then
-        moved="$(cat "$stale_reclaim/owner" 2>/dev/null)"
-        if [ "$moved" != "$sampled" ]; then
-          if [ ! -e "$RECLAIM_LOCK" ] && [ ! -L "$RECLAIM_LOCK" ]; then
-            mv "$stale_reclaim" "$RECLAIM_LOCK" 2>/dev/null || true
-          else
-            rm -f "$stale_reclaim/owner" 2>/dev/null
-            rmdir "$stale_reclaim" 2>/dev/null || true
-          fi
-          return 1
-        fi
-        rm -f "$stale_reclaim/owner" 2>/dev/null
-        rmdir "$stale_reclaim" 2>/dev/null || true
-        tries=$((tries + 1))
-        continue
-      fi
-    fi
-    return 1
-  done
-  return 1
+  local rc
+  codex_cc_lock_acquire_reclaim "$RECLAIM_LOCK" owner "$$" 100
+  rc=$?
+  [ "$rc" -ne 7 ] || die 7 "unsafe review reclaim lock"
+  return "$rc"
 }
 cleanup_review_locks() {
   remove_owned_reclaim_lock
@@ -383,11 +315,24 @@ case "$VERB" in
   begin)
     assert_no_live_dispatch
     shift 2; BASE_REF=""; SPEC_PATH=""; CAP=""
+    BASE_SEEN=false; SPEC_SEEN=false; CAP_SEEN=false
     while [ "$#" -gt 0 ]; do
       case "$1" in
-        --base) [ "$#" -ge 2 ] || usage; BASE_REF="$2"; shift 2 ;;
-        --spec) [ "$#" -ge 2 ] || usage; SPEC_PATH="$2"; shift 2 ;;
-        --cap) [ "$#" -ge 2 ] || usage; CAP="$2"; shift 2 ;;
+        --base)
+          [ "$#" -ge 2 ] || usage
+          ! $BASE_SEEN || die 2 "duplicate --base"
+          BASE_SEEN=true; BASE_REF="$2"; shift 2
+          ;;
+        --spec)
+          [ "$#" -ge 2 ] || usage
+          ! $SPEC_SEEN || die 2 "duplicate --spec"
+          SPEC_SEEN=true; SPEC_PATH="$2"; shift 2
+          ;;
+        --cap)
+          [ "$#" -ge 2 ] || usage
+          ! $CAP_SEEN || die 2 "duplicate --cap"
+          CAP_SEEN=true; CAP="$2"; shift 2
+          ;;
         *) usage ;;
       esac
     done

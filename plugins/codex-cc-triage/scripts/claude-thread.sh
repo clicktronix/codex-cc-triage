@@ -4,6 +4,8 @@ set -u
 umask 077
 
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
+# shellcheck source=lock-lib.sh
+. "$SCRIPT_DIR/lock-lib.sh"
 SNAPSHOT="$SCRIPT_DIR/repo_snapshot.py"
 PARSER="$SCRIPT_DIR/parse_claude_json.py"
 TIMEOUT_RUNNER="$SCRIPT_DIR/run_with_timeout.py"
@@ -83,25 +85,10 @@ prepare_state_dir() {
   fi
 }
 
-link_count() {
-  local count
-  count="$(stat -c '%h' "$1" 2>/dev/null)" && [ -n "$count" ] \
-    && { printf '%s' "$count"; return 0; }
-  stat -f '%l' "$1" 2>/dev/null
-}
-
 assert_single_link() {
-  local path="$1" links attempts=0
-  while [ "$attempts" -lt 3 ]; do
-    if links="$(link_count "$path")"; then
-      [ "$links" = 1 ] || die 7 "refusing multiply-linked thread state: $path"
-      return 0
-    fi
-    [ ! -e "$path" ] && [ ! -L "$path" ] && return 0
-    attempts=$((attempts + 1))
-    sleep 0.01 2>/dev/null || sleep 1
-  done
-  die 7 "cannot inspect state link count: $path"
+  local path="$1"
+  codex_cc_lock_assert_single_link "$path" \
+    || die 7 "refusing unsafe or multiply-linked thread state: $path"
 }
 
 assert_regular_or_missing() {
@@ -321,87 +308,24 @@ cleanup() {
   [ -z "$CAPTURE_STDOUT" ] || rm -f "$CAPTURE_STDOUT"
   [ -z "$CAPTURE_STDERR" ] || rm -f "$CAPTURE_STDERR"
   [ -z "$CAPTURE_STATUS" ] || rm -f "$CAPTURE_STATUS"
-  if [ -n "$LOCK" ] && [ ! -L "$LOCK" ] && [ -d "$LOCK" ] \
-      && [ ! -L "$LOCK/pid" ] && [ -f "$LOCK/pid" ] \
-      && [ "$(link_count "$LOCK/pid" 2>/dev/null)" = 1 ] \
-      && [ "$(cat "$LOCK/pid" 2>/dev/null)" = "$$" ]; then
-    rm -f "$LOCK/pid"
-    rmdir "$LOCK" 2>/dev/null || true
-  fi
-  if [ -n "$LOCK_RECLAIM" ] && [ ! -L "$LOCK_RECLAIM" ] && [ -d "$LOCK_RECLAIM" ] \
-      && [ ! -L "$LOCK_RECLAIM/pid" ] && [ -f "$LOCK_RECLAIM/pid" ] \
-      && [ "$(link_count "$LOCK_RECLAIM/pid" 2>/dev/null)" = 1 ] \
-      && [ "$(cat "$LOCK_RECLAIM/pid" 2>/dev/null)" = "$$" ]; then
-    rm -f "$LOCK_RECLAIM/pid"
-    rmdir "$LOCK_RECLAIM" 2>/dev/null || true
-  fi
+  [ -z "$LOCK" ] || codex_cc_lock_release_owned "$LOCK" pid "$$"
+  [ -z "$LOCK_RECLAIM" ] || codex_cc_lock_release_owned "$LOCK_RECLAIM" pid "$$"
 }
 
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-lock_mtime_epoch() {
-  local value
-  value="$(stat -c '%Y' "$1" 2>/dev/null)" && [ -n "$value" ] \
-    && { printf '%s' "$value"; return 0; }
-  stat -f '%m' "$1" 2>/dev/null
-}
-
 lock_is_stale() {
-  local path="$1" owner now modified
-  owner="$(cat "$path/pid" 2>/dev/null || true)"
-  case "$owner" in
-    [1-9]|[1-9][0-9]*)
-      [ "${#owner}" -le 12 ] && kill -0 "$owner" 2>/dev/null && return 1
-      return 0
-      ;;
-    '')
-      now="$(date +%s 2>/dev/null || true)"
-      modified="$(lock_mtime_epoch "$path" || true)"
-      case "$now:$modified" in *[!0-9:]*) return 1 ;; esac
-      [ $((now - modified)) -gt 60 ]
-      ;;
-    *) return 0 ;;
-  esac
+  codex_cc_lock_is_stale "$1" pid
 }
 
 acquire_lock_reclaim() {
-  local tries=0 sampled moved stale
-  while [ "$tries" -lt 100 ]; do
-    assert_directory_or_missing "$LOCK_RECLAIM" "thread lock recovery"
-    assert_regular_or_missing "$LOCK_RECLAIM/pid" "thread lock recovery owner"
-    if mkdir "$LOCK_RECLAIM" 2>/dev/null; then
-      if (set -C; printf '%s\n' "$$" > "$LOCK_RECLAIM/pid") 2>/dev/null \
-          && [ "$(cat "$LOCK_RECLAIM/pid" 2>/dev/null)" = "$$" ]; then
-        return 0
-      fi
-      return 1
-    fi
-    if lock_is_stale "$LOCK_RECLAIM"; then
-      sampled="$(cat "$LOCK_RECLAIM/pid" 2>/dev/null || true)"
-      stale="$LOCK_RECLAIM.stale.$$.$tries"
-      [ ! -e "$stale" ] && [ ! -L "$stale" ] || return 1
-      if mv "$LOCK_RECLAIM" "$stale" 2>/dev/null; then
-        moved="$(cat "$stale/pid" 2>/dev/null || true)"
-        if [ "$moved" != "$sampled" ]; then
-          if [ ! -e "$LOCK_RECLAIM" ] && [ ! -L "$LOCK_RECLAIM" ]; then
-            mv "$stale" "$LOCK_RECLAIM" 2>/dev/null || true
-          else
-            rm -f "$stale/pid" 2>/dev/null || true
-            rmdir "$stale" 2>/dev/null || true
-          fi
-          return 1
-        fi
-        rm -f "$stale/pid" 2>/dev/null || true
-        rmdir "$stale" 2>/dev/null || true
-        tries=$((tries + 1))
-        continue
-      fi
-    fi
-    return 1
-  done
-  return 1
+  local rc
+  codex_cc_lock_acquire_reclaim "$LOCK_RECLAIM" pid "$$" 100
+  rc=$?
+  [ "$rc" -ne 7 ] || die 7 "unsafe thread lock recovery"
+  return "$rc"
 }
 
 acquire_lock() {
@@ -455,8 +379,7 @@ acquire_lock() {
       || [ "$(cat "$LOCK/pid" 2>/dev/null)" != "$$" ]; then
     die 7 "cannot write lock owner"
   fi
-  rm -f "$LOCK_RECLAIM/pid" 2>/dev/null || true
-  rmdir "$LOCK_RECLAIM" 2>/dev/null || true
+  codex_cc_lock_release_owned "$LOCK_RECLAIM" pid "$$"
 }
 
 detect_target_ref() {

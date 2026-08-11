@@ -16,6 +16,7 @@ MODEL="${CODEX_CC_TRIAGE_MODEL:-sonnet}"
 BUDGET="${CODEX_CC_TRIAGE_MAX_BUDGET_USD:-1.00}"
 TIMEOUT_SECONDS="${CODEX_CC_TRIAGE_TIMEOUT_SECONDS:-900}"
 LOCK=""
+LOCK_RECLAIM=""
 RAW_JSON=""
 STDERR_FILE=""
 TIMEOUT_STATUS=""
@@ -47,7 +48,16 @@ STATE_DIR=""
 CONTEXT_DIR="$ROOT/$STATE_REL"
 
 prepare_state_dir() {
-  local tracked ignore_file temporary
+  local read_only="${1:-false}" tracked ignore_file temporary
+  if [ "$read_only" = true ]; then
+    STATE_DIR="$(bash "$STATE_HELPER" --read-only)" \
+      || die 7 "cannot resolve persistent thread state"
+    [ -n "$STATE_DIR" ] || die 7 "thread state path is empty"
+    [ ! -L "$STATE_DIR" ] || die 7 "refusing symlinked state directory: $STATE_DIR"
+    [ ! -e "$STATE_DIR" ] || [ -d "$STATE_DIR" ] \
+      || die 7 "state path is not a directory: $STATE_DIR"
+    return 0
+  fi
   STATE_DIR="$(bash "$STATE_HELPER")" \
     || die 7 "cannot resolve persistent thread state"
   [ ! -L "$STATE_DIR" ] || die 7 "refusing symlinked state directory: $STATE_DIR"
@@ -73,6 +83,48 @@ prepare_state_dir() {
   fi
 }
 
+link_count() {
+  local count
+  count="$(stat -c '%h' "$1" 2>/dev/null)" && [ -n "$count" ] \
+    && { printf '%s' "$count"; return 0; }
+  stat -f '%l' "$1" 2>/dev/null
+}
+
+assert_single_link() {
+  local path="$1" links attempts=0
+  while [ "$attempts" -lt 3 ]; do
+    if links="$(link_count "$path")"; then
+      [ "$links" = 1 ] || die 7 "refusing multiply-linked thread state: $path"
+      return 0
+    fi
+    [ ! -e "$path" ] && [ ! -L "$path" ] && return 0
+    attempts=$((attempts + 1))
+    sleep 0.01 2>/dev/null || sleep 1
+  done
+  die 7 "cannot inspect state link count: $path"
+}
+
+assert_regular_or_missing() {
+  local path="$1" label="$2"
+  [ ! -L "$path" ] || die 7 "$label is unsafe: $path"
+  [ ! -e "$path" ] && return 0
+  if [ ! -f "$path" ]; then
+    [ ! -e "$path" ] && return 0
+    die 7 "$label is unsafe: $path"
+  fi
+  assert_single_link "$path"
+}
+
+assert_directory_or_missing() {
+  local path="$1" label="$2"
+  [ ! -L "$path" ] || die 7 "$label is unsafe: $path"
+  [ ! -e "$path" ] && return 0
+  [ -d "$path" ] || {
+    [ ! -e "$path" ] && return 0
+    die 7 "$label is not a directory: $path"
+  }
+}
+
 assert_thread_files_safe() {
   local thread="$1"
   local suffix path
@@ -81,22 +133,18 @@ assert_thread_files_safe() {
     path="$STATE_DIR/$thread.$suffix"
     [ ! -L "$path" ] || die 7 "refusing symlinked thread state: $path"
     [ ! -e "$path" ] || [ -f "$path" ] || die 7 "thread state is not a regular file: $path"
+    [ ! -e "$path" ] || assert_single_link "$path"
   done
   path="$STATE_DIR/$thread.review-lock"
-  [ ! -L "$path" ] || die 7 "refusing symlinked required-review lock: $path"
-  [ ! -e "$path" ] || [ -d "$path" ] \
-    || die 7 "required-review lock is not a directory: $path"
-  [ ! -e "$path/owner" ] || { [ ! -L "$path/owner" ] && [ -f "$path/owner" ]; } \
-    || die 7 "required-review lock owner is unsafe: $path/owner"
+  assert_directory_or_missing "$path" "required-review lock"
+  assert_regular_or_missing "$path/owner" "required-review lock owner"
   path="$STATE_DIR/$thread.review-lock-reclaim"
-  [ ! -L "$path" ] || die 7 "refusing symlinked required-review reclaim lock: $path"
-  [ ! -e "$path" ] || [ -d "$path" ] \
-    || die 7 "required-review reclaim lock is not a directory: $path"
-  [ ! -e "$path/owner" ] || { [ ! -L "$path/owner" ] && [ -f "$path/owner" ]; } \
-    || die 7 "required-review reclaim lock owner is unsafe: $path/owner"
+  assert_directory_or_missing "$path" "required-review reclaim lock"
+  assert_regular_or_missing "$path/owner" "required-review reclaim lock owner"
   path="$CONTEXT_DIR/$thread.context.md"
   [ ! -L "$path" ] || die 7 "refusing symlinked review context: $path"
   [ ! -e "$path" ] || [ -f "$path" ] || die 7 "review context is not a regular file: $path"
+  [ ! -e "$path" ] || assert_single_link "$path"
 }
 
 validate_thread() {
@@ -273,9 +321,19 @@ cleanup() {
   [ -z "$CAPTURE_STDOUT" ] || rm -f "$CAPTURE_STDOUT"
   [ -z "$CAPTURE_STDERR" ] || rm -f "$CAPTURE_STDERR"
   [ -z "$CAPTURE_STATUS" ] || rm -f "$CAPTURE_STATUS"
-  if [ -n "$LOCK" ] && [ -f "$LOCK/pid" ] && [ "$(cat "$LOCK/pid" 2>/dev/null)" = "$$" ]; then
+  if [ -n "$LOCK" ] && [ ! -L "$LOCK" ] && [ -d "$LOCK" ] \
+      && [ ! -L "$LOCK/pid" ] && [ -f "$LOCK/pid" ] \
+      && [ "$(link_count "$LOCK/pid" 2>/dev/null)" = 1 ] \
+      && [ "$(cat "$LOCK/pid" 2>/dev/null)" = "$$" ]; then
     rm -f "$LOCK/pid"
     rmdir "$LOCK" 2>/dev/null || true
+  fi
+  if [ -n "$LOCK_RECLAIM" ] && [ ! -L "$LOCK_RECLAIM" ] && [ -d "$LOCK_RECLAIM" ] \
+      && [ ! -L "$LOCK_RECLAIM/pid" ] && [ -f "$LOCK_RECLAIM/pid" ] \
+      && [ "$(link_count "$LOCK_RECLAIM/pid" 2>/dev/null)" = 1 ] \
+      && [ "$(cat "$LOCK_RECLAIM/pid" 2>/dev/null)" = "$$" ]; then
+    rm -f "$LOCK_RECLAIM/pid"
+    rmdir "$LOCK_RECLAIM" 2>/dev/null || true
   fi
 }
 
@@ -283,31 +341,122 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+lock_mtime_epoch() {
+  local value
+  value="$(stat -c '%Y' "$1" 2>/dev/null)" && [ -n "$value" ] \
+    && { printf '%s' "$value"; return 0; }
+  stat -f '%m' "$1" 2>/dev/null
+}
+
+lock_is_stale() {
+  local path="$1" owner now modified
+  owner="$(cat "$path/pid" 2>/dev/null || true)"
+  case "$owner" in
+    [1-9]|[1-9][0-9]*)
+      [ "${#owner}" -le 12 ] && kill -0 "$owner" 2>/dev/null && return 1
+      return 0
+      ;;
+    '')
+      now="$(date +%s 2>/dev/null || true)"
+      modified="$(lock_mtime_epoch "$path" || true)"
+      case "$now:$modified" in *[!0-9:]*) return 1 ;; esac
+      [ $((now - modified)) -gt 60 ]
+      ;;
+    *) return 0 ;;
+  esac
+}
+
+acquire_lock_reclaim() {
+  local tries=0 sampled moved stale
+  while [ "$tries" -lt 100 ]; do
+    assert_directory_or_missing "$LOCK_RECLAIM" "thread lock recovery"
+    assert_regular_or_missing "$LOCK_RECLAIM/pid" "thread lock recovery owner"
+    if mkdir "$LOCK_RECLAIM" 2>/dev/null; then
+      if (set -C; printf '%s\n' "$$" > "$LOCK_RECLAIM/pid") 2>/dev/null \
+          && [ "$(cat "$LOCK_RECLAIM/pid" 2>/dev/null)" = "$$" ]; then
+        return 0
+      fi
+      return 1
+    fi
+    if lock_is_stale "$LOCK_RECLAIM"; then
+      sampled="$(cat "$LOCK_RECLAIM/pid" 2>/dev/null || true)"
+      stale="$LOCK_RECLAIM.stale.$$.$tries"
+      [ ! -e "$stale" ] && [ ! -L "$stale" ] || return 1
+      if mv "$LOCK_RECLAIM" "$stale" 2>/dev/null; then
+        moved="$(cat "$stale/pid" 2>/dev/null || true)"
+        if [ "$moved" != "$sampled" ]; then
+          if [ ! -e "$LOCK_RECLAIM" ] && [ ! -L "$LOCK_RECLAIM" ]; then
+            mv "$stale" "$LOCK_RECLAIM" 2>/dev/null || true
+          else
+            rm -f "$stale/pid" 2>/dev/null || true
+            rmdir "$stale" 2>/dev/null || true
+          fi
+          return 1
+        fi
+        rm -f "$stale/pid" 2>/dev/null || true
+        rmdir "$stale" 2>/dev/null || true
+        tries=$((tries + 1))
+        continue
+      fi
+    fi
+    return 1
+  done
+  return 1
+}
+
 acquire_lock() {
   local thread="$1"
-  local owner
+  local owner sampled moved stale
   LOCK="$STATE_DIR/$thread.active"
-  [ ! -L "$LOCK" ] || die 7 "refusing symlinked thread lock: $LOCK"
-  [ ! -e "$LOCK" ] || [ -d "$LOCK" ] || die 7 "thread lock is not a directory: $LOCK"
+  LOCK_RECLAIM="$STATE_DIR/$thread.active-reclaim"
+  assert_directory_or_missing "$LOCK" "thread lock"
+  assert_regular_or_missing "$LOCK/pid" "thread lock owner"
   if mkdir "$LOCK" 2>/dev/null; then
-    printf '%s\n' "$$" > "$LOCK/pid" || die 7 "cannot write lock owner"
+    if ! (set -C; printf '%s\n' "$$" > "$LOCK/pid") 2>/dev/null \
+        || [ "$(cat "$LOCK/pid" 2>/dev/null)" != "$$" ]; then
+      die 7 "cannot write lock owner"
+    fi
     return
   fi
 
+  acquire_lock_reclaim || die 10 "thread lock recovery is active: $thread"
+
+  # Re-sample only while holding the separate reclaim mutex. Moving the whole
+  # generation before removal prevents another stale contender from deleting
+  # the fresh lock installed by the winner.
+  assert_directory_or_missing "$LOCK" "thread lock"
+  [ -d "$LOCK" ] || die 10 "thread lock changed concurrently: $thread"
+  assert_regular_or_missing "$LOCK/pid" "thread lock owner"
   owner="$(cat "$LOCK/pid" 2>/dev/null || true)"
   case "$owner" in
-    ''|*[!0-9]*) ;;
-    *)
-      if kill -0 "$owner" 2>/dev/null; then
-        die 10 "thread is active: $thread (pid $owner)"
-      fi
+    [1-9]|[1-9][0-9]*)
+      kill -0 "$owner" 2>/dev/null \
+        && die 10 "thread is active: $thread (pid $owner)"
       ;;
+    '') ;;
+    *) ;;
   esac
-
-  rm -f "$LOCK/pid" 2>/dev/null || true
-  rmdir "$LOCK" 2>/dev/null || die 10 "thread lock changed concurrently: $thread"
+  stale="$LOCK.stale.$$"
+  [ ! -e "$stale" ] && [ ! -L "$stale" ] \
+    || die 7 "stale thread lock path already exists: $stale"
+  sampled="$owner"
+  mv "$LOCK" "$stale" 2>/dev/null \
+    || die 10 "thread lock changed during stale takeover: $thread"
+  moved="$(cat "$stale/pid" 2>/dev/null || true)"
+  if [ "$moved" != "$sampled" ]; then
+    [ -e "$LOCK" ] || mv "$stale" "$LOCK" 2>/dev/null || true
+    die 10 "thread lock generation changed during stale takeover: $thread"
+  fi
+  rm -f "$stale/pid" 2>/dev/null || true
+  rmdir "$stale" 2>/dev/null \
+    || die 10 "cannot remove stale thread lock: $thread"
   mkdir "$LOCK" 2>/dev/null || die 10 "thread was acquired concurrently: $thread"
-  printf '%s\n' "$$" > "$LOCK/pid" || die 7 "cannot write lock owner"
+  if ! (set -C; printf '%s\n' "$$" > "$LOCK/pid") 2>/dev/null \
+      || [ "$(cat "$LOCK/pid" 2>/dev/null)" != "$$" ]; then
+    die 7 "cannot write lock owner"
+  fi
+  rm -f "$LOCK_RECLAIM/pid" 2>/dev/null || true
+  rmdir "$LOCK_RECLAIM" 2>/dev/null || true
 }
 
 detect_target_ref() {
@@ -329,11 +478,13 @@ detect_target_ref() {
 status_threads() {
   local requested="${1:-}"
   local found=0 state_file thread mode base session rounds state seen='|'
-  for state_file in "$STATE_DIR"/*.id "$STATE_DIR"/*.mode; do
+  local required_file required_status required_verdict required_gate required_reason required_expiry
+  for state_file in "$STATE_DIR"/*.id "$STATE_DIR"/*.mode "$STATE_DIR"/*.review-state; do
     [ -f "$state_file" ] || continue
     thread="$(basename "$state_file")"
     thread="${thread%.id}"
     thread="${thread%.mode}"
+    thread="${thread%.review-state}"
     case "$seen" in
       *"|$thread|"*) continue ;;
     esac
@@ -344,21 +495,36 @@ status_threads() {
       continue
     fi
     found=1
-    mode="$(cat "$STATE_DIR/$thread.mode" 2>/dev/null || printf '?')"
-    base="$(cat "$STATE_DIR/$thread.base" 2>/dev/null || printf '-')"
+    required_file="$STATE_DIR/$thread.review-state"
+    required_status="$(sed -n 's/^status=//p' "$required_file" 2>/dev/null | head -1)"
+    required_verdict="$(sed -n 's/^verdict=//p' "$required_file" 2>/dev/null | head -1)"
+    required_gate="$(sed -n 's/^gate_eligible=//p' "$required_file" 2>/dev/null | head -1)"
+    required_reason="$(sed -n 's/^reason=//p' "$required_file" 2>/dev/null | head -1)"
+    required_expiry="$(sed -n 's/^claim_expires_at=//p' "$required_file" 2>/dev/null | head -1)"
+    mode="$(cat "$STATE_DIR/$thread.mode" 2>/dev/null || true)"
+    [ -n "$mode" ] || { [ -n "$required_status" ] && mode=review || mode='?'; }
+    base="$(cat "$STATE_DIR/$thread.base" 2>/dev/null || true)"
+    [ -n "$base" ] || base="$(sed -n 's/^base_sha=//p' "$required_file" 2>/dev/null | head -1)"
+    [ -n "$base" ] || base='-'
     session="$(cat "$STATE_DIR/$thread.id" 2>/dev/null || printf '-')"
     rounds="$(grep -Ec '^## [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z mode=(ask|plan|review)$' \
       "$STATE_DIR/$thread.log" 2>/dev/null || true)"
     rounds="${rounds:-0}"
     state="ready"
-    if [ "$session" = "-" ] \
+    if { [ "$session" = "-" ] && [ -z "$required_status" ]; } \
       || [ -f "$STATE_DIR/$thread.failed" ] \
       || [ -s "$STATE_DIR/$thread.last-error.json" ] \
       || [ -s "$STATE_DIR/$thread.last-error.stderr" ]; then
       state="failed"
     fi
-    printf '%s\tmode=%s\tbase=%s\trounds=%s\tstate=%s\tsession=%s\n' \
+    printf '%s\tmode=%s\tbase=%s\trounds=%s\tstate=%s\tsession=%s' \
       "$thread" "$mode" "$base" "$rounds" "$state" "$session"
+    if [ -n "$required_status" ]; then
+      printf '\trequired=%s\tgate_eligible=%s\tverdict=%s\treason=%s\tclaim_expires_at=%s' \
+        "$required_status" "${required_gate:-?}" "${required_verdict:-NONE}" \
+        "${required_reason:--}" "${required_expiry:--}"
+    fi
+    printf '\n'
   done
   if [ "$found" -eq 0 ]; then
     if [ -n "$requested" ]; then
@@ -373,10 +539,11 @@ reset_thread() {
   validate_thread "$thread"
   assert_thread_files_safe "$thread"
   acquire_lock "$thread"
-  [ ! -e "$STATE_DIR/$thread.review-lock" ] \
-    || die 10 "required-review state is active: $thread"
-  [ ! -e "$STATE_DIR/$thread.review-lock-reclaim" ] \
-    || die 10 "required-review reclamation is active: $thread"
+  # review-state owns and generation-checks its own mutex. Let reset acquire it
+  # so a dead lock can be reclaimed safely; a live operation still fails closed.
+  CODEX_CC_TRIAGE_REVIEW_RESET_LEASE_PID="$$" \
+    bash "$SCRIPT_DIR/review-state.sh" reset "$thread" >/dev/null \
+    || die $? "cannot reset required-review state for '$thread'"
   rm -f \
     "$STATE_DIR/$thread.id" \
     "$STATE_DIR/$thread.mode" \
@@ -386,10 +553,6 @@ reset_thread() {
     "$STATE_DIR/$thread.last-prompt" \
     "$STATE_DIR/$thread.last-result" \
     "$STATE_DIR/$thread.last-fingerprint" \
-    "$STATE_DIR/$thread.candidate" \
-    "$STATE_DIR/$thread.review-state" \
-    "$STATE_DIR/$thread.review-loop" \
-    "$STATE_DIR/$thread.approved" \
     "$STATE_DIR/$thread.failed" \
     "$STATE_DIR/$thread.last-error.json" \
     "$STATE_DIR/$thread.last-error.stderr" \
@@ -431,6 +594,7 @@ append_log() {
   local prompt="$3"
   local metadata="$4"
   local result="$5"
+  assert_thread_files_safe "$thread"
   {
     printf '\n## %s mode=%s\n\n' "$(date -u +%FT%TZ)" "$mode"
     printf '### prompt\n\n%s\n\n' "$prompt"
@@ -674,7 +838,11 @@ if [ "$action" = "name" ]; then
   exit $?
 fi
 
-prepare_state_dir
+if [ "$action" = status ]; then
+  prepare_state_dir true
+else
+  prepare_state_dir false
+fi
 
 case "$action" in
   status)

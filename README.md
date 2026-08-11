@@ -47,9 +47,14 @@ worktree mutation and fails the call. Before each dispatch, the wrapper verifies
 Claude CLI flags, and `claude auth status` through the same bounded process runner; incompatible,
 unauthenticated, or hung installations fail before repository content is sent.
 
-Required review records `APPROVE` only when Claude's foreground result, dispatch fingerprint,
-candidate HEAD/tree, canonical base, and tracked spec all match. `REQUEST_CHANGES`, a missing verdict,
-candidate movement, timeout, cap, or tool failure emits no approval marker.
+Required review records `APPROVE` only when one foreground result belongs to the exact claim returned
+by `begin`, the review round advances exactly once, and the dispatch fingerprint, candidate
+HEAD/tree, canonical base, tracked spec, and exact prompt scope all match. The lifecycle pins base,
+spec, and cap until an explicit thread reset. Its cap counts reserved `begin` claims including the
+first and does not refund an aborted preflight, timeout, or tool failure. `REQUEST_CHANGES`, a missing
+verdict, candidate movement, timeout, cap, divergence, or tool
+failure emits no approval marker. Refuted or deferred findings may keep the same candidate, but still
+require a new claim and fresh review before approval.
 
 Review context is bounded. If the complete diff does not fit, the driver fails before invoking
 Claude instead of silently omitting later files. Split the change or raise the context limit
@@ -63,7 +68,10 @@ The inspected repository content is sent through your configured Claude Code acc
 IDs, prompts, results, diagnostics, and required-review state remain under
 `<git-common-dir>/codex-cc-triage/threads/`, outside the worktree and Git index. `state-dir.sh` migrates
 legacy `.agent-state/codex-cc-triage/` state on the first mutating call without deleting the legacy
-copy. The generated bounded context file alone remains in the current worktree's self-ignored
+copy. A source-specific completion marker prevents later legacy drift from silently changing the
+shared state. State files, dispatch leases, and migration/review locks reject symbolic links,
+non-regular files, and multiply-linked files. The generated bounded context file alone remains in
+the current worktree's self-ignored
 `.agent-state/codex-cc-triage/` directory so Claude's read-only tools can open it; it is disposable and
 is not approval state.
 
@@ -95,6 +103,10 @@ follows Anthropic's [CLI](https://code.claude.com/docs/en/cli-usage) and
 Version 0.4 adds bounded technical questions, deterministic thread naming, CLI/authentication
 preflight checks, wall-clock timeouts, failed-thread visibility, explicit-invocation regression
 coverage, and Linux/macOS CI.
+
+The next release hardens required review with per-attempt claims, exact dispatch attribution,
+pinned lifecycle contracts, explicit abort/reset/terminal states, granular stale diagnostics, and
+required-state visibility in thread status.
 
 Version 0.3 renames the plugin from `codex-cc-tuner` to `codex-cc-triage` so it mirrors
 `cc-codex-triage`. Existing state under `.agent-state/codex-cc-tuner/` is left untouched; move only

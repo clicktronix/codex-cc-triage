@@ -22,6 +22,47 @@ if ! ROOT="$(git -C "${CODEX_CC_TRIAGE_PROJECT_DIR:-$PWD}" rev-parse --show-topl
 fi
 cd "$ROOT" || exit 7
 
+link_count() {
+  count="$(stat -c '%h' "$1" 2>/dev/null)" && [ -n "$count" ] \
+    && { printf '%s' "$count"; return 0; }
+  stat -f '%l' "$1" 2>/dev/null
+}
+assert_single_link() {
+  attempts=0
+  while [ "$attempts" -lt 3 ]; do
+    if links="$(link_count "$1")"; then
+      [ "$links" = 1 ] || { echo "refusing multiply-linked state: $1" >&2; exit 7; }
+      return 0
+    fi
+    [ ! -e "$1" ] && [ ! -L "$1" ] && return 0
+    attempts=$((attempts + 1))
+    sleep 0.01 2>/dev/null || sleep 1
+  done
+  echo "cannot inspect state link count: $1" >&2
+  exit 7
+}
+assert_regular_or_missing() {
+  inspected="$1"; label="$2"
+  [ ! -L "$inspected" ] || { echo "$label is unsafe" >&2; exit 7; }
+  [ ! -e "$inspected" ] && return 0
+  if [ ! -f "$inspected" ]; then
+    [ ! -e "$inspected" ] && return 0
+    echo "$label is unsafe" >&2
+    exit 7
+  fi
+  assert_single_link "$inspected"
+}
+assert_directory_or_missing() {
+  inspected="$1"; label="$2"
+  [ ! -L "$inspected" ] || { echo "$label is unsafe" >&2; exit 7; }
+  [ ! -e "$inspected" ] && return 0
+  [ -d "$inspected" ] || {
+    [ ! -e "$inspected" ] && return 0
+    echo "$label is not a directory" >&2
+    exit 7
+  }
+}
+
 if [ -n "${CODEX_CC_TRIAGE_STATE_DIR:-}" ]; then
   case "$CODEX_CC_TRIAGE_STATE_DIR" in
     /*) STATE_DIR="$CODEX_CC_TRIAGE_STATE_DIR" ;;
@@ -38,6 +79,7 @@ if [ -n "${CODEX_CC_TRIAGE_STATE_DIR:-}" ]; then
     [ ! -L "$IGNORE_FILE" ] || { echo "refusing symlinked state ignore file" >&2; exit 7; }
     [ ! -e "$IGNORE_FILE" ] || [ -f "$IGNORE_FILE" ] \
       || { echo "state ignore path is not a regular file" >&2; exit 7; }
+    [ ! -e "$IGNORE_FILE" ] || assert_single_link "$IGNORE_FILE"
     if ! grep -qxF '*' "$IGNORE_FILE" 2>/dev/null; then
       IGNORE_TMP="$(mktemp "$IGNORE_FILE.tmp.XXXXXX")" || exit 7
       printf '*\n' > "$IGNORE_TMP" && mv -f "$IGNORE_TMP" "$IGNORE_FILE" \
@@ -58,6 +100,11 @@ if ! COMMON_DIR="$(cd "$COMMON_DIR" 2>/dev/null && pwd -P)" || [ -z "$COMMON_DIR
   exit 7
 fi
 STATE_DIR="$COMMON_DIR/codex-cc-triage/threads"
+PARENT="$COMMON_DIR/codex-cc-triage"
+MIGRATION_DIR="$PARENT/migrations"
+MIGRATION_KEY="$(printf '%s\n' "$ROOT" | git hash-object --stdin 2>/dev/null)" || exit 7
+[ -n "$MIGRATION_KEY" ] || { echo "cannot identify legacy state source" >&2; exit 7; }
+MIGRATION_MARKER="$MIGRATION_DIR/$MIGRATION_KEY.state-v1"
 LEGACY_PARENT="$ROOT/.agent-state"
 LEGACY_DIR="$LEGACY_PARENT/codex-cc-triage"
 [ ! -L "$LEGACY_PARENT" ] || {
@@ -79,20 +126,46 @@ if [ -d "$LEGACY_DIR" ]; then
     exit 7
   }
 fi
+assert_migration_marker_safe() {
+  [ ! -L "$PARENT" ] || { echo "refusing symlinked state parent" >&2; exit 7; }
+  [ ! -e "$PARENT" ] || [ -d "$PARENT" ] \
+    || { echo "state parent is not a directory" >&2; exit 7; }
+  [ ! -L "$MIGRATION_DIR" ] || { echo "refusing symlinked migration marker directory" >&2; exit 7; }
+  [ ! -e "$MIGRATION_DIR" ] || [ -d "$MIGRATION_DIR" ] \
+    || { echo "migration marker path is not a directory" >&2; exit 7; }
+  [ ! -L "$MIGRATION_MARKER" ] || { echo "refusing symlinked state migration marker" >&2; exit 7; }
+  [ ! -e "$MIGRATION_MARKER" ] || [ -f "$MIGRATION_MARKER" ] \
+    || { echo "state migration marker is not a regular file" >&2; exit 7; }
+  [ ! -e "$MIGRATION_MARKER" ] || assert_single_link "$MIGRATION_MARKER"
+}
+migration_complete() {
+  assert_migration_marker_safe
+  [ -f "$MIGRATION_MARKER" ] || return 1
+  [ "$(cat "$MIGRATION_MARKER" 2>/dev/null)" = "legacy_dir=$LEGACY_DIR" ] \
+    || { echo "state migration marker does not match its legacy source" >&2; exit 7; }
+}
 preflight_legacy_state() {
+  migration_complete && return 0
   [ -d "$LEGACY_DIR" ] && [ "$LEGACY_DIR" != "$STATE_DIR" ] || return 0
   for src in "$LEGACY_DIR"/* "$LEGACY_DIR"/.[!.]* "$LEGACY_DIR"/..?*; do
-    [ -e "$src" ] || continue
+    [ -e "$src" ] || [ -L "$src" ] || continue
     name="${src##*/}"
     case "$name" in
-      .gitignore|*.context.md|*.active|*.review-lock|*.review-lock-reclaim|*.tmp.*) continue ;;
+      .gitignore|*.context.md|*.active|*.active-reclaim|*.review-lock|*.review-lock-reclaim|*.tmp.*) continue ;;
     esac
     if [ -L "$src" ]; then
       echo "state-dir.sh: refused symlinked legacy state at $src" >&2
-      continue
+      return 7
     fi
+    [ -f "$src" ] \
+      || { echo "state-dir.sh: legacy state is not a regular file: $src" >&2; return 7; }
+    assert_single_link "$src"
     dest="$STATE_DIR/$name"
+    [ ! -L "$dest" ] \
+      || { echo "state-dir.sh: refused symlinked shared state at $dest" >&2; return 7; }
     if [ -e "$dest" ]; then
+      [ -f "$dest" ] || { echo "state-dir.sh: shared state is not a regular file: $dest" >&2; return 7; }
+      assert_single_link "$dest"
       if [ -f "$src" ] && [ -f "$dest" ] && cmp -s "$src" "$dest"; then
         continue
       fi
@@ -103,6 +176,11 @@ preflight_legacy_state() {
 }
 
 if $READ_ONLY; then
+  if migration_complete; then
+    [ -d "$STATE_DIR" ] || { echo "migrated state directory is missing" >&2; exit 7; }
+    printf '%s\n' "$STATE_DIR"
+    exit 0
+  fi
   preflight_legacy_state || exit $?
   if [ -d "$STATE_DIR" ]; then
     printf '%s\n' "$STATE_DIR"
@@ -115,10 +193,7 @@ if $READ_ONLY; then
   exit 0
 fi
 
-PARENT="$COMMON_DIR/codex-cc-triage"
-[ ! -L "$PARENT" ] || { echo "refusing symlinked state parent" >&2; exit 7; }
-[ ! -e "$PARENT" ] || [ -d "$PARENT" ] \
-  || { echo "state parent is not a directory" >&2; exit 7; }
+assert_migration_marker_safe
 mkdir -p "$PARENT" || exit 1
 [ ! -L "$STATE_DIR" ] || { echo "refusing symlinked thread directory" >&2; exit 7; }
 LOCK="$PARENT/migration.lock"
@@ -129,12 +204,8 @@ mtime_epoch() {
 }
 assert_lock_safe() {
   lock_path="$1"
-  [ ! -L "$lock_path" ] || { echo "state-dir.sh: refusing symlinked lock" >&2; exit 7; }
-  [ ! -e "$lock_path" ] || [ -d "$lock_path" ] \
-    || { echo "state-dir.sh: lock is not a directory" >&2; exit 7; }
-  [ ! -e "$lock_path/owner" ] \
-    || { [ ! -L "$lock_path/owner" ] && [ -f "$lock_path/owner" ]; } \
-    || { echo "state-dir.sh: lock owner is unsafe" >&2; exit 7; }
+  assert_directory_or_missing "$lock_path" "state-dir.sh: lock"
+  assert_regular_or_missing "$lock_path/owner" "state-dir.sh: lock owner"
 }
 remove_owned_lock() {
   lock_path="$1"
@@ -149,6 +220,58 @@ cleanup_migration_locks() {
   remove_owned_lock "$RECLAIM_LOCK"
   remove_owned_lock "$LOCK"
 }
+lock_is_stale() {
+  candidate_lock="$1"; candidate_owner="$(cat "$candidate_lock/owner" 2>/dev/null)"
+  case "$candidate_owner" in
+    '')
+      now="$(date +%s 2>/dev/null)"; mt="$(mtime_epoch "$candidate_lock")"
+      case "$now:$mt" in :*|*:|*[!0-9:]*) return 1 ;; esac
+      [ $((now - mt)) -gt 60 ]
+      ;;
+    0|0[0-9]*|*[!0-9]*) return 0 ;;
+    *)
+      [ "${#candidate_owner}" -le 12 ] || return 0
+      kill -0 "$candidate_owner" 2>/dev/null && return 1
+      return 0
+      ;;
+  esac
+}
+acquire_reclaim_lock() {
+  reclaim_tries=0
+  while [ "$reclaim_tries" -lt 100 ]; do
+    assert_lock_safe "$RECLAIM_LOCK"
+    if mkdir "$RECLAIM_LOCK" 2>/dev/null; then
+      if (set -C; printf '%s\n' "$$" > "$RECLAIM_LOCK/owner") 2>/dev/null \
+          && [ "$(cat "$RECLAIM_LOCK/owner" 2>/dev/null)" = "$$" ]; then
+        return 0
+      fi
+      return 1
+    fi
+    if lock_is_stale "$RECLAIM_LOCK"; then
+      sampled_owner="$(cat "$RECLAIM_LOCK/owner" 2>/dev/null)"
+      stale_reclaim="$RECLAIM_LOCK.stale.$$.$reclaim_tries"
+      [ ! -e "$stale_reclaim" ] && [ ! -L "$stale_reclaim" ] || return 1
+      if mv "$RECLAIM_LOCK" "$stale_reclaim" 2>/dev/null; then
+        moved_owner="$(cat "$stale_reclaim/owner" 2>/dev/null)"
+        if [ "$moved_owner" != "$sampled_owner" ]; then
+          if [ ! -e "$RECLAIM_LOCK" ] && [ ! -L "$RECLAIM_LOCK" ]; then
+            mv "$stale_reclaim" "$RECLAIM_LOCK" 2>/dev/null || true
+          else
+            rm -f "$stale_reclaim/owner" 2>/dev/null
+            rmdir "$stale_reclaim" 2>/dev/null || true
+          fi
+          return 1
+        fi
+        rm -f "$stale_reclaim/owner" 2>/dev/null
+        rmdir "$stale_reclaim" 2>/dev/null || true
+        reclaim_tries=$((reclaim_tries + 1))
+        continue
+      fi
+    fi
+    return 1
+  done
+  return 1
+}
 trap cleanup_migration_locks EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
@@ -158,29 +281,24 @@ while :; do
   assert_lock_safe "$LOCK"
   assert_lock_safe "$RECLAIM_LOCK"
   if mkdir "$LOCK" 2>/dev/null; then
-    printf '%s\n' "$$" > "$LOCK/owner" || { rmdir "$LOCK" 2>/dev/null; exit 1; }
+    if ! (set -C; printf '%s\n' "$$" > "$LOCK/owner") 2>/dev/null \
+        || [ "$(cat "$LOCK/owner" 2>/dev/null)" != "$$" ]; then
+      echo "state-dir.sh: cannot own migration lock" >&2
+      exit 7
+    fi
     break
   fi
-  if mkdir "$RECLAIM_LOCK" 2>/dev/null; then
-    printf '%s\n' "$$" > "$RECLAIM_LOCK/owner" \
-      || { rmdir "$RECLAIM_LOCK" 2>/dev/null; exit 1; }
+  if acquire_reclaim_lock; then
     # Re-sample only while holding the separate reclamation guard. This keeps
     # a contender from acting on the generation another process replaced.
     assert_lock_safe "$LOCK"
     reclaim=false
     if [ -d "$LOCK" ]; then
       owner="$(cat "$LOCK/owner" 2>/dev/null)"
-      case "$owner" in
-        ''|*[!0-9]*)
-          now="$(date +%s 2>/dev/null)"; mt="$(mtime_epoch "$LOCK")"
-          case "$now:$mt" in :*|*:|*[!0-9:]*) ;; *)
-            [ $((now - mt)) -gt 60 ] && reclaim=true
-            ;;
-          esac
-          ;;
-        *) kill -0 "$owner" 2>/dev/null || reclaim=true ;;
-      esac
+      lock_is_stale "$LOCK" && reclaim=true
       if $reclaim; then
+        [ "$(cat "$RECLAIM_LOCK/owner" 2>/dev/null)" = "$$" ] \
+          || { echo "state-dir.sh: lost migration reclaim lock" >&2; exit 7; }
         stale_lock="$LOCK.stale.$$"
         [ ! -e "$stale_lock" ] && [ ! -L "$stale_lock" ] \
           || { echo "state-dir.sh: stale lock path exists" >&2; exit 7; }
@@ -189,6 +307,8 @@ while :; do
             || { rm -f "$stale_lock"; echo "state-dir.sh: refused symlinked stale lock" >&2; exit 7; }
           [ ! -L "$stale_lock/owner" ] \
             || { echo "state-dir.sh: refused unsafe stale lock owner" >&2; exit 7; }
+          [ "$(cat "$stale_lock/owner" 2>/dev/null)" = "$owner" ] \
+            || { echo "state-dir.sh: migration lock generation changed during reclaim" >&2; exit 7; }
           rm -f "$stale_lock/owner" 2>/dev/null
           rmdir "$stale_lock" 2>/dev/null || true
         fi
@@ -202,31 +322,42 @@ while :; do
   sleep 0.05 2>/dev/null || sleep 1
 done
 
+if migration_complete; then
+  [ -d "$STATE_DIR" ] || { echo "migrated state directory is missing" >&2; exit 7; }
+  printf '%s\n' "$STATE_DIR"
+  exit 0
+fi
+
 # Copy under a common-Git mutex. The legacy directory is deliberately retained
-# so an older installed plugin can still read it. Preflight the complete source
-# first so a conflict cannot produce a partially migrated shared state.
+# so an older installed plugin can still read it and collisions stay recoverable.
 mkdir -p "$STATE_DIR" || exit 1
 
 if [ -d "$LEGACY_DIR" ] && [ "$LEGACY_DIR" != "$STATE_DIR" ]; then
   preflight_legacy_state || exit $?
   for src in "$LEGACY_DIR"/* "$LEGACY_DIR"/.[!.]* "$LEGACY_DIR"/..?*; do
-    [ -e "$src" ] || continue
+    [ -e "$src" ] || [ -L "$src" ] || continue
     name="${src##*/}"
     case "$name" in
-      .gitignore|*.context.md|*.active|*.review-lock|*.review-lock-reclaim|*.tmp.*) continue ;;
+      .gitignore|*.context.md|*.active|*.active-reclaim|*.review-lock|*.review-lock-reclaim|*.tmp.*) continue ;;
     esac
-    if [ -L "$src" ]; then
-      echo "state-dir.sh: refused symlinked legacy state at $src" >&2
-      continue
-    fi
     dest="$STATE_DIR/$name"
     if [ ! -e "$dest" ]; then
-      cp -pR "$src" "$dest" 2>/dev/null || {
+      cp -p "$src" "$dest" 2>/dev/null || {
         echo "state-dir.sh: could not migrate $src" >&2
         exit 1
       }
     fi
   done
+  mkdir -p "$MIGRATION_DIR" || exit 1
+  marker_tmp="$(mktemp "$MIGRATION_MARKER.tmp.XXXXXX")" || exit 1
+  if printf 'legacy_dir=%s\n' "$LEGACY_DIR" > "$marker_tmp" \
+      && mv -f "$marker_tmp" "$MIGRATION_MARKER"; then
+    :
+  else
+    rm -f "$marker_tmp" 2>/dev/null
+    echo "state-dir.sh: could not publish migration marker" >&2
+    exit 1
+  fi
 fi
 
 printf '%s\n' "$STATE_DIR"

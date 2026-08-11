@@ -105,7 +105,7 @@ Version 0.4 adds bounded technical questions, deterministic thread naming, CLI/a
 preflight checks, wall-clock timeouts, failed-thread visibility, explicit-invocation regression
 coverage, and Linux/macOS CI.
 
-The next release hardens required review with per-attempt claims, exact dispatch attribution,
+Version 0.5 hardens required review with per-attempt claims, exact dispatch attribution,
 pinned lifecycle contracts, explicit abort/reset/terminal states, granular stale diagnostics, and
 required-state visibility in thread status.
 

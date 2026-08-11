@@ -86,10 +86,23 @@ if [ "${FAKE_CLAUDE_FAIL:-0}" = "1" ]; then
   exit 9
 fi
 
-if [ "$resumed" -eq 1 ]; then
+if [ -n "${FAKE_CLAUDE_RESULT:-}" ]; then
+  result="$FAKE_CLAUDE_RESULT"
+elif [ "$resumed" -eq 1 ]; then
   result="FAKE_RESUME"
 else
   result="FAKE_INITIAL"
 fi
-printf '{"is_error":false,"session_id":"%s","result":"%s","total_cost_usd":0.0123,"duration_ms":450,"num_turns":1}\n' \
-  "$session_id" "$result"
+FAKE_CLAUDE_SESSION_ID="$session_id" FAKE_CLAUDE_JSON_RESULT="$result" python3 - <<'PY'
+import json
+import os
+
+print(json.dumps({
+    "is_error": False,
+    "session_id": os.environ["FAKE_CLAUDE_SESSION_ID"],
+    "result": os.environ["FAKE_CLAUDE_JSON_RESULT"],
+    "total_cost_usd": 0.0123,
+    "duration_ms": 450,
+    "num_turns": 1,
+}))
+PY

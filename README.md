@@ -3,8 +3,9 @@
 A Codex plugin for persistent, read-only second opinions from Claude Code.
 
 Use it to ask one bounded technical question, stress-test a plan, review a complete branch diff,
-and ask follow-up questions in the same Claude session. Threads are task-scoped and stored locally
-under `.agent-state/codex-cc-triage/`.
+and ask follow-up questions in the same Claude session. It also exposes a machine-verified required
+review for owning delivery workflows. Task-scoped threads live in the repository common Git directory
+so they survive disposable-worktree cleanup.
 
 ## Install
 
@@ -23,6 +24,7 @@ Start a new Codex thread after installation, then invoke a skill explicitly:
 $codex-cc-triage:claude-second-opinion ask Claude which module should own this boundary
 $codex-cc-triage:claude-plan stress-test docs/plans/new-billing-flow.md
 $codex-cc-triage:claude-review review this branch against main for correctness and regressions
+$codex-cc-triage:claude-review --required --base <sha> --spec <path> --thread review-<run-id> --cap 5 review this exact candidate
 $codex-cc-triage:claude-reply <thread-from-review-output> re-evaluate after my fixes
 $codex-cc-triage:claude-thread status
 $codex-cc-triage:claude-thread new <thread-from-output>
@@ -45,6 +47,15 @@ worktree mutation and fails the call. Before each dispatch, the wrapper verifies
 Claude CLI flags, and `claude auth status` through the same bounded process runner; incompatible,
 unauthenticated, or hung installations fail before repository content is sent.
 
+Required review records `APPROVE` only when one foreground result belongs to the exact claim returned
+by `begin`, the review round advances exactly once, and the dispatch fingerprint, candidate
+HEAD/tree, canonical base, tracked spec, and exact prompt scope all match. The lifecycle pins base,
+spec, and cap until an explicit thread reset. Its cap counts reserved `begin` claims including the
+first and does not refund an aborted preflight, timeout, or tool failure. `REQUEST_CHANGES`, a missing
+verdict, candidate movement, timeout, cap, divergence, or tool
+failure emits no approval marker. Refuted or deferred findings may keep the same candidate, but still
+require a new claim and fresh review before approval.
+
 Review context is bounded. If the complete diff does not fit, the driver fails before invoking
 Claude instead of silently omitting later files. Split the change or raise the context limit
 deliberately.
@@ -54,8 +65,15 @@ timeouts and CLI failures preserve stderr and any partial JSON under the named t
 preflight failures are reported synchronously and remain visible as failed thread state.
 
 The inspected repository content is sent through your configured Claude Code account. Local thread
-IDs, prompts, results, and diagnostics remain in `.agent-state/codex-cc-triage/`. Its internal
-`.gitignore` keeps the directory out of Git without modifying protected `.git/` metadata.
+IDs, prompts, results, diagnostics, and required-review state remain under
+`<git-common-dir>/codex-cc-triage/threads/`, outside the worktree and Git index. `state-dir.sh` migrates
+legacy `.agent-state/codex-cc-triage/` state on the first mutating call without deleting the legacy
+copy. A source-specific completion marker prevents later legacy drift from silently changing the
+shared state. State files, dispatch leases, and migration/review locks reject symbolic links,
+non-regular files, and multiply-linked files. The generated bounded context file alone remains in
+the current worktree's self-ignored
+`.agent-state/codex-cc-triage/` directory so Claude's read-only tools can open it; it is disposable and
+is not approval state.
 
 ## Configuration
 
@@ -85,6 +103,10 @@ follows Anthropic's [CLI](https://code.claude.com/docs/en/cli-usage) and
 Version 0.4 adds bounded technical questions, deterministic thread naming, CLI/authentication
 preflight checks, wall-clock timeouts, failed-thread visibility, explicit-invocation regression
 coverage, and Linux/macOS CI.
+
+The next release hardens required review with per-attempt claims, exact dispatch attribution,
+pinned lifecycle contracts, explicit abort/reset/terminal states, granular stale diagnostics, and
+required-state visibility in thread status.
 
 Version 0.3 renames the plugin from `codex-cc-tuner` to `codex-cc-triage` so it mirrors
 `cc-codex-triage`. Existing state under `.agent-state/codex-cc-tuner/` is left untouched; move only

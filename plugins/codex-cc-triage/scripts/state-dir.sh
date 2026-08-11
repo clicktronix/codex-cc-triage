@@ -140,7 +140,7 @@ preflight_legacy_state() {
     [ -e "$src" ] || [ -L "$src" ] || continue
     name="${src##*/}"
     case "$name" in
-      .gitignore|*.context.md|*.active|*.active-reclaim|*.review-lock|*.review-lock-reclaim|*.tmp.*) continue ;;
+      .gitignore|.reclaim.guard|*.context.md|*.active|*.active-reclaim|*.review-lock|*.review-lock-reclaim|*.tmp.*) continue ;;
     esac
     if [ -L "$src" ]; then
       echo "state-dir.sh: refused symlinked legacy state at $src" >&2
@@ -278,7 +278,7 @@ if [ -d "$LEGACY_DIR" ] && [ "$LEGACY_DIR" != "$STATE_DIR" ]; then
     [ -e "$src" ] || [ -L "$src" ] || continue
     name="${src##*/}"
     case "$name" in
-      .gitignore|*.context.md|*.active|*.active-reclaim|*.review-lock|*.review-lock-reclaim|*.tmp.*) continue ;;
+      .gitignore|.reclaim.guard|*.context.md|*.active|*.active-reclaim|*.review-lock|*.review-lock-reclaim|*.tmp.*) continue ;;
     esac
     dest="$STATE_DIR/$name"
     if [ ! -e "$dest" ]; then

@@ -191,6 +191,17 @@ record_required review-run-1 >/dev/null 2>&1 || bad "completed dispatch could no
 
 reset_review
 begin_required review-run-1 --base "$BASE" --spec docs/spec.md --cap 1
+printf 'APPROVE\n' > "$STATE/review-run-1.last-result"
+reviewctl abort review-run-1 tool-failure "$CLAIM" >/dev/null 2>&1; rc=$?
+if [ "$rc" -eq 10 ] && grep -qxF status=PENDING "$STATE/review-run-1.review-state" \
+    && grep -qxF attempts=1 "$STATE/review-run-1.review-loop"; then
+  ok "abort cannot refund a result published before the thread log"
+else
+  bad "abort refunded a partially published dispatch result"
+fi
+
+reset_review
+begin_required review-run-1 --base "$BASE" --spec docs/spec.md --cap 1
 reviewctl abort review-run-1 tool-failure "$CLAIM" >/dev/null 2>&1; rc=$?
 if [ "$rc" -eq 10 ] && grep -qxF status=ABORTED "$STATE/review-run-1.review-state" \
     && grep -qxF attempts=0 "$STATE/review-run-1.review-loop"; then

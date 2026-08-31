@@ -190,16 +190,28 @@ fi
 record_required review-run-1 >/dev/null 2>&1 || bad "completed dispatch could not be recorded after refused abort"
 
 reset_review
-begin_required review-run-1 --base "$BASE" --spec docs/spec.md --cap 2
+begin_required review-run-1 --base "$BASE" --spec docs/spec.md --cap 1
 reviewctl abort review-run-1 tool-failure "$CLAIM" >/dev/null 2>&1; rc=$?
-if [ "$rc" -eq 10 ] && grep -qxF status=ABORTED "$STATE/review-run-1.review-state"; then
-  ok "abort releases only an unfinished claimed round"
+if [ "$rc" -eq 10 ] && grep -qxF status=ABORTED "$STATE/review-run-1.review-state" \
+    && grep -qxF attempts=0 "$STATE/review-run-1.review-loop"; then
+  ok "abort returns the slot for an unfinished claimed round"
 else
-  bad "abort did not record the required failure state"
+  bad "abort did not return the unfinished claim"
 fi
-begin_required review-run-1 --base "$BASE" --spec docs/spec.md --cap 2
+reviewctl abort review-run-1 tool-failure "$CLAIM" >/dev/null 2>&1; rc=$?
+if [ "$rc" -eq 10 ] && grep -qxF attempts=0 "$STATE/review-run-1.review-loop"; then
+  ok "a repeated abort cannot return the same slot twice"
+else
+  bad "a repeated abort changed the attempt budget"
+fi
+begin_required review-run-1 --base "$BASE" --spec docs/spec.md --cap 1
+if printf '%s\n' "$begin_output" | grep -q 'attempt=1/1'; then
+  ok "a cap-1 lifecycle can retry after an aborted dispatch"
+else
+  bad "an aborted dispatch exhausted cap 1"
+fi
 reviewctl stop review-run-1 divergence "$CLAIM" >/dev/null 2>&1; rc=$?
-blocked="$(reviewctl begin review-run-1 --base "$BASE" --spec docs/spec.md --cap 2 2>&1)"; blocked_rc=$?
+blocked="$(reviewctl begin review-run-1 --base "$BASE" --spec docs/spec.md --cap 1 2>&1)"; blocked_rc=$?
 status_output="$(CODEX_CC_TRIAGE_PROJECT_DIR="$REPO" CODEX_CC_TRIAGE_STATE_DIR="$STATE" \
   bash "$DRIVER" status review-run-1 2>&1)"; status_rc=$?
 if [ "$rc" -eq 10 ] && [ "$blocked_rc" -eq 10 ] \
@@ -208,6 +220,17 @@ if [ "$rc" -eq 10 ] && [ "$blocked_rc" -eq 10 ] \
   ok "divergence is a terminal hard stop"
 else
   bad "terminal divergence was restartable"
+fi
+
+reset_review
+begin_required review-run-1 --base "$BASE" --spec docs/spec.md --cap 1
+sed -i.bak 's/^attempts=.*/attempts=0/' "$STATE/review-run-1.review-loop"
+rm -f "$STATE/review-run-1.review-loop.bak"
+reviewctl abort review-run-1 dispatch-failure "$CLAIM" >/dev/null 2>&1; rc=$?
+if [ "$rc" -eq 10 ] && grep -qxF status=PENDING "$STATE/review-run-1.review-state"; then
+  ok "partial attempt publication fails closed instead of refunding twice"
+else
+  bad "inconsistent attempt state was refunded"
 fi
 reviewctl reset review-run-1 >/dev/null
 if begin_required review-run-1 --base "$BASE" --spec docs/spec.md --cap 1; then

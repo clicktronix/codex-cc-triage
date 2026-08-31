@@ -22,8 +22,7 @@ flags, and reject a dirty candidate. Required mode is foreground and read-only; 
 failure, missing verdict, cap, divergence, candidate movement, or `REQUEST_CHANGES` never approves.
 
 1. Resolve `<plugin-root>`, then capture the candidate before dispatch. Preserve the exact `claim`
-   token printed by `begin`; it reserves this attempt, is not refunded after abort, and cannot be
-   reused for another:
+   token printed by `begin`; it reserves this attempt and cannot be reused for another:
 
    ```bash
    bash "<plugin-root>/scripts/review-state.sh" begin <thread> \
@@ -69,7 +68,8 @@ failure, missing verdict, cap, divergence, candidate movement, or `REQUEST_CHANG
 
 4. If dispatch fails before producing a completed round, release only that claim with
    `review-state.sh abort <thread> <dispatch-failure|timeout|tool-failure> <claim-token>`. `abort`
-   refuses a claim after any dispatch result was recorded.
+   refuses a claim after any dispatch result was recorded and returns the unspent cap slot. A crash
+   while publishing the returned slot remains fail-closed as `PENDING`.
 5. On `REQUEST_CHANGES`, validate every finding. Commit accepted fixes as a new clean candidate, or
    keep the same immutable candidate when all findings are explicitly refuted or deferred. Either
    path requires a fresh `begin`, one fresh review dispatch, and its new claim; review history alone

@@ -503,6 +503,14 @@ case "$VERB" in
       || die 10 "INVALID_CLAIM_STATE: reset the required-review thread"
     [ "$ROUND_NOW" = "$ROUND_BEFORE" ] && [ "$NOW_BYTES" = "$OLD_BYTES" ] \
       || die 10 "ROUND_COMPLETED: record the finished dispatch instead of aborting its claim"
+    ATTEMPT="$(field "$CANDIDATE" attempt)"
+    LOOP_BASE="$(field "$LOOP_STATE" base_sha)"; LOOP_SPEC="$(field "$LOOP_STATE" spec_path)"
+    LOOP_CAP="$(field "$LOOP_STATE" cap)"; LOOP_START="$(field "$LOOP_STATE" start_round)"
+    LOOP_ATTEMPTS="$(field "$LOOP_STATE" attempts)"
+    valid_decimal "$ATTEMPT" 7 && valid_decimal "$LOOP_ATTEMPTS" 7 \
+      && [ "$ATTEMPT" -gt 0 ] && [ "$LOOP_ATTEMPTS" = "$ATTEMPT" ] \
+      || die 10 "INVALID_CLAIM_STATE: reset the required-review thread"
+    write_loop_state "$LOOP_BASE" "$LOOP_SPEC" "$LOOP_CAP" "$LOOP_START" "$((ATTEMPT - 1))"
     HEAD_SHA="$(head_sha 2>/dev/null || true)"; TREE_SHA="$(tree_sha 2>/dev/null || true)"; FP="$(fingerprint)"
     write_state ABORTED NONE false foreground "$HEAD_SHA" "$TREE_SHA" "$FP" "$ROUND_NOW" "$3"
     die 10 "ABORTED: required-review round released after $3"

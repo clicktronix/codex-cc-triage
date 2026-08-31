@@ -52,7 +52,9 @@ Required review records `APPROVE` only when one foreground result belongs to the
 by `begin`, the review round advances exactly once, and the dispatch fingerprint, candidate
 HEAD/tree, canonical base, tracked spec, and exact prompt scope all match. The lifecycle pins base,
 spec, and cap until an explicit thread reset. Its cap counts reserved `begin` claims including the
-first and does not refund an aborted preflight, timeout, or tool failure. `REQUEST_CHANGES`, a missing
+first. An abort returns the slot only when no dispatch result was recorded; a crash while publishing
+that return stays fail-closed. The failed call may still have incurred external cost, so `--cap` does
+not bound paid calls on this path. `REQUEST_CHANGES`, a missing
 verdict, candidate movement, timeout, cap, divergence, or tool
 failure emits no approval marker. Refuted or deferred findings may keep the same candidate, but still
 require a new claim and fresh review before approval.
@@ -105,9 +107,12 @@ Version 0.4 adds bounded technical questions, deterministic thread naming, CLI/a
 preflight checks, wall-clock timeouts, failed-thread visibility, explicit-invocation regression
 coverage, and Linux/macOS CI.
 
-Version 0.5 hardens required review with per-attempt claims, exact dispatch attribution,
-pinned lifecycle contracts, explicit abort/reset/terminal states, granular stale diagnostics, and
-required-state visibility in thread status.
+Version 0.6 returns an unspent review slot only when an aborted dispatch produced no result, while
+keeping partial state publication fail-closed.
+
+Version 0.5 hardens required review with per-attempt claims, exact dispatch attribution, pinned
+lifecycle contracts, explicit abort/reset/terminal states, granular stale diagnostics, and required
+state visibility in thread status.
 
 Version 0.3 renames the plugin from `codex-cc-tuner` to `codex-cc-triage` so it mirrors
 `cc-codex-triage`. Existing state under `.agent-state/codex-cc-tuner/` is left untouched; move only

@@ -391,6 +391,11 @@ case "$VERB" in
         && write_state CAP_REACHED NONE false foreground "$HEAD_SHA" "$TREE_SHA" "$FP" "$CURRENT_ROUND" cap
       die 10 "CAP_REACHED: required review already claimed $CAP attempt(s)"
     fi
+    rm -f \
+      "$STATE_DIR/$THREAD.last-prompt" \
+      "$STATE_DIR/$THREAD.last-result" \
+      "$STATE_DIR/$THREAD.last-fingerprint" \
+      || die 7 "cannot clear prior required-review result artifacts"
     ATTEMPT=$((ATTEMPTS + 1)); ROUND_BEFORE="$CURRENT_ROUND"
     write_loop_state "$BASE_SHA" "$SPEC_PATH" "$CAP" "$LOOP_START" "$ATTEMPT"
     CLAIMED_AT="$(date +%s 2>/dev/null)"
@@ -503,6 +508,10 @@ case "$VERB" in
       || die 10 "INVALID_CLAIM_STATE: reset the required-review thread"
     [ "$ROUND_NOW" = "$ROUND_BEFORE" ] && [ "$NOW_BYTES" = "$OLD_BYTES" ] \
       || die 10 "ROUND_COMPLETED: record the finished dispatch instead of aborting its claim"
+    for artifact in last-prompt last-result last-fingerprint; do
+      [ ! -e "$STATE_DIR/$THREAD.$artifact" ] \
+        || die 10 "ROUND_COMPLETED: record the published dispatch result instead of aborting its claim"
+    done
     ATTEMPT="$(field "$CANDIDATE" attempt)"
     LOOP_BASE="$(field "$LOOP_STATE" base_sha)"; LOOP_SPEC="$(field "$LOOP_STATE" spec_path)"
     LOOP_CAP="$(field "$LOOP_STATE" cap)"; LOOP_START="$(field "$LOOP_STATE" start_round)"

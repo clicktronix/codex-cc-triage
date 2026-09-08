@@ -86,7 +86,7 @@ assert_directory_or_missing() {
   }
 }
 assert_state_files_safe() {
-  for suffix in candidate review-state review-loop approved log last-prompt last-result last-fingerprint; do
+  for suffix in candidate review-state review-loop approved log last-prompt last-result last-fingerprint last-base; do
     path="$STATE_DIR/$THREAD.$suffix"
     [ ! -L "$path" ] || die 7 "refusing symlinked required-review state: $path"
     [ ! -e "$path" ] || [ -f "$path" ] \
@@ -194,7 +194,9 @@ assert_no_live_dispatch() {
   [ "$active" = "$allowed_pid" ] && return 0
   kill -0 "$active" 2>/dev/null \
     && die 10 "thread dispatch is active: $THREAD"
-  die 10 "STALE_DISPATCH_LEASE: reset the thread through claude-thread.sh new"
+  # Leave the dead lease for the driver's ownership-checked reclaim. Recovery
+  # of an unfinished claim must preserve the session id and conversation log.
+  return 0
 }
 head_sha() { git rev-parse --verify HEAD 2>/dev/null; }
 tree_sha() { git rev-parse --verify 'HEAD^{tree}' 2>/dev/null; }
@@ -460,6 +462,8 @@ case "$VERB" in
     elif [ "$ROUND_NOW" -ne $((ROUND_BEFORE + 1)) ]; then STALE_REASON=round_counter_mismatch
     elif ! prompt_scope_exact "$PROMPT" "$C_BASE" "$C_HEAD" "$C_SPEC"; then
       STALE_REASON=prompt_scope_mismatch
+    elif [ "$(cat "$STATE_DIR/$THREAD.last-base" 2>/dev/null)" != "$C_BASE" ]; then
+      STALE_REASON=dispatch_base_mismatch
     fi
     if [ -n "$STALE_REASON" ]; then
       write_state STALE "${VERDICT:-NONE}" false foreground "$HEAD_SHA" "$TREE_SHA" "${DISPATCH_FP:-unknown}" "$ROUND_NOW" "$STALE_REASON"
@@ -545,6 +549,7 @@ case "$VERB" in
 
   check)
     [ "$#" -eq 2 ] || usage
+    assert_no_live_dispatch
     [ -f "$CANDIDATE" ] && [ -f "$REVIEW_STATE" ] && [ -f "$APPROVED" ] \
       || die 10 "NO_APPROVAL"
     cmp -s "$REVIEW_STATE" "$APPROVED" \
@@ -563,6 +568,9 @@ case "$VERB" in
       && [ "$(field "$APPROVED" base_sha)" = "$(field "$CANDIDATE" base_sha)" ] \
       && [ "$(field "$APPROVED" spec_path)" = "$(field "$CANDIDATE" spec_path)" ] \
       || die 10 "NO_APPROVAL"
+    [ "$(review_round)" = "$(field "$APPROVED" round)" ] \
+      && [ "$(cat "$STATE_DIR/$THREAD.last-base" 2>/dev/null)" = "$(field "$APPROVED" base_sha)" ] \
+      || die 10 "NO_APPROVAL: newer dispatch or missing actual base"
     clean_candidate || die 11 "STALE: candidate is dirty"
     HEAD_SHA="$(head_sha 2>/dev/null || true)"; TREE_SHA="$(tree_sha 2>/dev/null || true)"
     FP="$(fingerprint)"

@@ -2,6 +2,7 @@
 set -u
 
 if [ "${1:-}" = "--help" ]; then
+  [ -z "${FAKE_CLAUDE_HELP_LOG:-}" ] || echo help >> "$FAKE_CLAUDE_HELP_LOG"
   if [ -n "${FAKE_CLAUDE_HELP_SLEEP_SECONDS:-}" ]; then
     sleep "$FAKE_CLAUDE_HELP_SLEEP_SECONDS"
   fi
@@ -17,6 +18,7 @@ if [ "${1:-}" = "--help" ]; then
     --disable-slash-commands \
     --no-chrome \
     --model \
+    --effort \
     --max-budget-usd \
     --output-format \
     --resume \

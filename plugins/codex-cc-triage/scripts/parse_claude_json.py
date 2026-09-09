@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import uuid
 from pathlib import Path
@@ -65,6 +66,8 @@ def main() -> int:
     turns = payload.get("num_turns")
     duration_ms = payload.get("duration_ms")
     metadata = {
+        "model_requested": os.environ.get("CODEX_CC_TRIAGE_MODEL", "sonnet"),
+        "effort_requested": os.environ.get("CODEX_CC_TRIAGE_EFFORT") or "provider-default",
         "cost_usd": cost
         if isinstance(cost, (int, float)) and not isinstance(cost, bool)
         else None,

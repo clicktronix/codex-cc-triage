@@ -4,4 +4,4 @@ interface:
   default_prompt: "Use $codex-cc-triage:claude-thread to show my Claude review threads."
 
 policy:
-  allow_implicit_invocation: false
+  allow_implicit_invocation: true

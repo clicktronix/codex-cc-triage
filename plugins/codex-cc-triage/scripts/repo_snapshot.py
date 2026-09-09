@@ -234,6 +234,16 @@ def build_context(
         writer.write(diff or b"(no tracked diff)\n")
         writer.write(b"```\n")
 
+        # A net base-to-worktree diff can erase a staged change that the
+        # worktree reverses. Preserve both layers only when partial staging exists.
+        staged, unstaged = staged_and_unstaged_diffs(root, state_rel)
+        if staged and unstaged:
+            for label, patch in [("staged: HEAD to index", staged),
+                                 ("unstaged: index to worktree", unstaged)]:
+                writer.write(f"\n## {label}\n\n```diff\n".encode())
+                writer.write(patch)
+                writer.write(b"```\n")
+
         untracked = untracked_paths(root, state_rel)
         if untracked:
             writer.write(b"\n## untracked files\n")

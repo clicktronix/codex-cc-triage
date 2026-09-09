@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -u
+export CODEX_CC_TRIAGE_REFRESH_CAPABILITIES=1
 
 ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 DRIVER="$ROOT/plugins/codex-cc-triage/scripts/claude-thread.sh"

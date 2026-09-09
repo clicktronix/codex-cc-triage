@@ -27,6 +27,7 @@ python3 -m py_compile \
 bash "$ROOT/tests/driver-regression.sh"
 bash "$ROOT/tests/lock-lib-regression.sh"
 bash "$ROOT/tests/review-contract-regression.sh"
+python3 "$ROOT/tests/product-integrity.py"
 python3 "$ROOT/tests/validate_structure.py"
 bash "$ROOT/tests/structure-regression.sh"
 bash "$ROOT/tests/timeout-runner-regression.sh"

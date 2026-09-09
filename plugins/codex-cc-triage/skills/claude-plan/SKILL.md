@@ -1,12 +1,14 @@
 ---
 name: claude-plan
-description: Use only when the user explicitly asks Codex to get a Claude Code second opinion, critique, or adversarial stress-test of an implementation plan or technical design.
+description: Use when an authorized owning workflow explicitly invokes this skill, or the user explicitly asks Codex to get a Claude Code second opinion, critique, or adversarial stress-test of an implementation plan or technical design.
 ---
 
 # Claude Plan
 
 Use Claude Code as a read-only second-opinion planner. Codex remains the judge: validate every
 objection against the repository before changing the plan.
+
+Follow [ownership.md](../references/ownership.md).
 
 1. Read the relevant plan, task, repository instructions, and architecture boundaries yourself.
 2. Resolve `<plugin-root>` as two directories above this skill's directory (the parent of

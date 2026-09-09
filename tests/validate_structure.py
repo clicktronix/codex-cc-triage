@@ -78,8 +78,8 @@ def main() -> int:
     if manifest.get("name") != "codex-cc-triage":
         fail("plugin name mismatch")
         failures += 1
-    if manifest.get("version") != "0.6.0":
-        fail("plugin version must be 0.6.0")
+    if manifest.get("version") != "0.7.0":
+        fail("plugin version must be 0.7.0")
         failures += 1
     if manifest.get("skills") != "./skills/":
         fail("plugin skills path must be ./skills/")
@@ -196,8 +196,9 @@ def main() -> int:
                 fail(f"{agent_file}: default prompt must use the plugin namespace")
                 failures += 1
             policy = metadata.get("policy", {})
-            if policy != {"allow_implicit_invocation": False}:
-                fail(f"{agent_file}: skill must require explicit invocation")
+            implicit = name == "claude-thread"
+            if policy != {"allow_implicit_invocation": implicit}:
+                fail(f"{agent_file}: only thread maintenance permits implicit invocation")
                 failures += 1
 
     if discovered != expected:

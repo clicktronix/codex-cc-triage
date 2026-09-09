@@ -1,12 +1,14 @@
 ---
 name: claude-second-opinion
-description: Use only when the user explicitly asks Codex to ask Claude Code one bounded technical question or get an independent second opinion that is not a full plan critique or branch review.
+description: Use when an authorized owning workflow explicitly invokes this skill, or the user explicitly asks Codex to ask Claude Code one bounded technical question or get an independent second opinion that is not a full plan critique or branch review.
 ---
 
 # Claude Second Opinion
 
 Use Claude Code for one focused, read-only opinion. Route full plan critiques to
 `$codex-cc-triage:claude-plan` and branch reviews to `$codex-cc-triage:claude-review`.
+
+Follow [ownership.md](../references/ownership.md).
 
 1. Inspect the relevant repository evidence yourself and state the unresolved question narrowly.
 2. Resolve `<plugin-root>` as two directories above this skill's directory.

@@ -186,11 +186,11 @@ assert_no_live_dispatch() {
   active="$(cat "$ACTIVE_LEASE/pid" 2>/dev/null)"
   case "$active" in
     ''|0|0[0-9]*|*[!0-9]*)
-      die 10 "INVALID_DISPATCH_LEASE: reset the thread through claude-thread.sh new"
+      die 10 "INVALID_DISPATCH_LEASE: verify process ownership and follow claude-thread Recovery; do not discard an active lease"
       ;;
   esac
   [ "${#active}" -le 12 ] \
-    || die 10 "INVALID_DISPATCH_LEASE: reset the thread through claude-thread.sh new"
+    || die 10 "INVALID_DISPATCH_LEASE: verify process ownership and follow claude-thread Recovery; do not discard an active lease"
   [ "$active" = "$allowed_pid" ] && return 0
   kill -0 "$active" 2>/dev/null \
     && die 10 "thread dispatch is active: $THREAD"
@@ -296,8 +296,8 @@ write_loop_state() {
 }
 assert_claim() {
   provided="$1"; expected="$(field "$CANDIDATE" claim_token)"
-  case "$expected" in ''|*[!0-9a-f]*) die 10 "INVALID_CLAIM_STATE: reset the required-review thread" ;; esac
-  case "${#expected}" in 40|64) ;; *) die 10 "INVALID_CLAIM_STATE: reset the required-review thread" ;; esac
+  case "$expected" in ''|*[!0-9a-f]*) die 10 "INVALID_CLAIM_STATE: inspect saved state; follow claude-thread Recovery before resetting" ;; esac
+  case "${#expected}" in 40|64) ;; *) die 10 "INVALID_CLAIM_STATE: inspect saved state; follow claude-thread Recovery before resetting" ;; esac
   [ "$provided" = "$expected" ] \
     || die 10 "CLAIM_MISMATCH: required-review round belongs to another invocation"
 }
@@ -310,7 +310,7 @@ case "$VERB" in
     [ "$#" -eq 2 ] || usage
     assert_no_live_dispatch
     [ ! -f "$CANDIDATE" ] \
-      || die 10 "REQUIRED_THREAD_RESERVED: use a different thread for advisory review, or reset this required-review lifecycle"
+      || die 10 "REQUIRED_THREAD_RESERVED: use a different thread for advisory review; preserve this required lifecycle"
     echo "ADVISORY_READY thread=$THREAD"
     ;;
 
@@ -363,8 +363,11 @@ case "$VERB" in
       PENDING)
         die 10 "PENDING: finish or abort the claimed review round before begin"
         ;;
-      CAP_REACHED|DIVERGED)
-        die 10 "$STATUS: reset the thread before starting another required review"
+      CAP_REACHED)
+        die 10 "CAP_REACHED: report missing approval and continue safe work; another review budget needs user authorization"
+        ;;
+      DIVERGED)
+        die 10 "DIVERGED: return disagreements to the owner, continue safe repairs and follow claude-thread Recovery within the remaining authorization"
         ;;
     esac
     if [ -f "$LOOP_STATE" ]; then
@@ -380,7 +383,7 @@ case "$VERB" in
       [ "$LOOP_BASE" = "$BASE_SHA" ] \
         && [ "$LOOP_SPEC" = "$SPEC_PATH" ] \
         && [ "$LOOP_CAP" = "$CAP" ] \
-        || die 10 "REVIEW_CONTRACT_CHANGED: reset the thread before changing required-review base, spec, or cap"
+        || die 10 "REVIEW_CONTRACT_CHANGED: restore the original base/spec/cap, or start a new lifecycle for an authorized contract change"
     else
       LOOP_START="$CURRENT_ROUND"
       ATTEMPTS=0
@@ -509,7 +512,7 @@ case "$VERB" in
     NOW_BYTES="$(wc -c 2>/dev/null < "$STATE_DIR/$THREAD.log" | tr -d ' ')"; NOW_BYTES="${NOW_BYTES:-0}"
     valid_decimal "$ROUND_BEFORE" 7 && valid_decimal "$ROUND_NOW" 7 \
       && case "$OLD_BYTES:$NOW_BYTES" in *[!0-9:]*) false ;; *) true ;; esac \
-      || die 10 "INVALID_CLAIM_STATE: reset the required-review thread"
+      || die 10 "INVALID_CLAIM_STATE: inspect saved state; follow claude-thread Recovery before resetting"
     [ "$ROUND_NOW" = "$ROUND_BEFORE" ] && [ "$NOW_BYTES" = "$OLD_BYTES" ] \
       || die 10 "ROUND_COMPLETED: record the finished dispatch instead of aborting its claim"
     for artifact in last-prompt last-result last-fingerprint; do
@@ -522,7 +525,7 @@ case "$VERB" in
     LOOP_ATTEMPTS="$(field "$LOOP_STATE" attempts)"
     valid_decimal "$ATTEMPT" 7 && valid_decimal "$LOOP_ATTEMPTS" 7 \
       && [ "$ATTEMPT" -gt 0 ] && [ "$LOOP_ATTEMPTS" = "$ATTEMPT" ] \
-      || die 10 "INVALID_CLAIM_STATE: reset the required-review thread"
+      || die 10 "INVALID_CLAIM_STATE: inspect saved state; follow claude-thread Recovery before resetting"
     write_loop_state "$LOOP_BASE" "$LOOP_SPEC" "$LOOP_CAP" "$LOOP_START" "$((ATTEMPT - 1))"
     HEAD_SHA="$(head_sha 2>/dev/null || true)"; TREE_SHA="$(tree_sha 2>/dev/null || true)"; FP="$(fingerprint)"
     write_state ABORTED NONE false foreground "$HEAD_SHA" "$TREE_SHA" "$FP" "$ROUND_NOW" "$3"

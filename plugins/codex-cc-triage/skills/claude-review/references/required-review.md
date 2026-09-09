@@ -59,6 +59,8 @@ failure, missing verdict, cap, divergence, candidate movement, or `REQUEST_CHANG
    `review-state.sh abort <thread> <dispatch-failure|timeout|tool-failure> <claim-token>`. `abort`
    refuses a claim after any dispatch result was recorded and returns the unspent cap slot. A crash
    while publishing the returned slot remains fail-closed as `PENDING`.
+   If `abort` reports `ROUND_COMPLETED`, record the completed round instead. For damaged
+   claims or leases, follow [thread recovery](../../claude-thread/SKILL.md#recovery).
 5. On `REQUEST_CHANGES`, validate every finding. Commit accepted fixes as a new clean candidate, or
    keep the same immutable candidate when all findings are explicitly refuted or explicitly waived by the user. Either
    path requires a fresh `begin`, one fresh review dispatch, and its new claim; review history alone
@@ -68,14 +70,16 @@ failure, missing verdict, cap, divergence, candidate movement, or `REQUEST_CHANG
    divergence while a claim is still `PENDING`, call
    `review-state.sh stop <thread> <cap|divergence> <claim-token>`. Otherwise preserve the recorded
    terminal state. Continue safe repairs and return the missing approval to the owner in one request.
-   Reset only through `$codex-cc-triage:claude-thread new <thread>` after the user
-   chooses to start a new required lifecycle.
+   Use [thread recovery](../../claude-thread/SKILL.md#recovery) for a new lifecycle after
+   resolving divergence. Exhausting the review budget requires renewed user authorization;
+   reuse an existing decision rather than asking again.
 
 Never synthesize the marker from Claude prose. Only `review-state.sh record/check` may emit it.
 
 The driver refuses a required comparison against another base before the paid call; record
-also checks actual base metadata. Any later reply or failed dispatch revokes previous
-approval. On a dead lease, abort the unfinished claim and reuse this thread: recovery
+also checks actual base metadata. After Python validation, a later reply or failed dispatch
+revokes previous approval; a missing runtime leaves state intact. On a dead lease,
+abort the unfinished claim and reuse this thread: recovery
 preserves its session id and log. Do not reset merely to clear a stale process marker.
 
 A clean candidate and endpoint fingerprints do not prove an immutable filesystem for

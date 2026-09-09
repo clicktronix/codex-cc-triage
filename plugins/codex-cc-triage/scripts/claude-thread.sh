@@ -194,7 +194,6 @@ PY
 
 check_runtime() {
   local help_output auth_output missing_flag rc capability_key capability_file
-  check_python_runtime
   command -v "$CLAUDE_BIN" >/dev/null 2>&1 \
     || die 9 "Claude Code CLI was not found: '$CLAUDE_BIN'"
 
@@ -418,6 +417,16 @@ status_threads() {
   local requested="${1:-}"
   local found=0 state_file thread mode base session rounds state seen='|'
   local required_file required_status required_verdict required_gate required_reason required_expiry
+  local archive archive_count=0 archive_bytes=0 size
+  for archive in "$STATE_DIR"/*.archive.*; do
+    [ -f "$archive" ] && [ ! -L "$archive" ] || continue
+    if [ -n "$requested" ]; then
+      case "${archive##*/}" in "$requested".archive.*) ;; *) continue ;; esac
+    fi
+    size="$(wc -c < "$archive")" || die 7 "cannot read archive: $archive"
+    archive_count=$((archive_count + 1))
+    archive_bytes=$((archive_bytes + size))
+  done
   for state_file in "$STATE_DIR"/*.id "$STATE_DIR"/*.mode "$STATE_DIR"/*.review-state; do
     [ -f "$state_file" ] || continue
     thread="$(basename "$state_file")"
@@ -466,11 +475,12 @@ status_threads() {
     printf '\n'
   done
   if [ "$found" -eq 0 ]; then
-    if [ -n "$requested" ]; then
+    if [ -n "$requested" ] && [ "$archive_count" -eq 0 ]; then
       die 6 "thread does not exist: $requested"
     fi
     echo "No Claude threads."
   fi
+  printf 'Archives: %s file(s), %s bytes retained in %s\n' "$archive_count" "$archive_bytes" "$STATE_DIR"
 }
 
 reset_thread() {
@@ -590,7 +600,7 @@ run_claude() {
     validate_thread "$thread"
     case "$existing_mode" in
       ask|plan|review) ;;
-      *) die 6 "thread '$thread' has an id but no valid mode; reset it before reuse" ;;
+      *) die 6 "thread '$thread' has an id but no valid mode; follow claude-thread Recovery before reuse" ;;
     esac
   fi
 
@@ -616,15 +626,15 @@ run_claude() {
     esac
     stored_base="$(cat "$base_file" 2>/dev/null || true)"
     if [ -n "$existing_id" ] && [ -z "$stored_base" ]; then
-      die 6 "review thread '$thread' has no base ref; reset it before reuse"
+      die 6 "review thread '$thread' has no base ref; follow claude-thread Recovery before reuse"
     fi
     if [ -n "$existing_id" ]; then
       case "$stored_base" in
-        *[!0-9A-Fa-f]*) die 6 "review thread '$thread' has an invalid pinned base; reset it" ;;
+        *[!0-9A-Fa-f]*) die 6 "review thread '$thread' has an invalid pinned base; follow claude-thread Recovery" ;;
       esac
       case "${#stored_base}" in
         40|64) ;;
-        *) die 6 "review thread '$thread' has an invalid pinned base; reset it" ;;
+        *) die 6 "review thread '$thread' has an invalid pinned base; follow claude-thread Recovery" ;;
       esac
       if [ -n "$target_ref" ]; then
         resolved_target="$(git rev-parse --verify "$target_ref^{commit}" 2>/dev/null)" \
@@ -799,6 +809,9 @@ if [ "$action" = "name" ]; then
   thread_name "${2:-}" "${3:-}"
   exit $?
 fi
+
+# Check the existing dependency before migration, lease acquisition or approval invalidation.
+case "$action" in dispatch|reply) check_python_runtime ;; esac
 
 if [ "$action" = status ]; then
   prepare_state_dir true

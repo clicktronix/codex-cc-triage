@@ -129,4 +129,73 @@ class ProductIntegrity(unittest.TestCase):
         self.assertFalse((self.sd/'review.id').exists())
         self.assertNotEqual(self.gate('check','review').returncode,0)
 
+    def test_broken_python_is_reported_before_dispatch_changes_state(self):
+        self.approve()
+        before={p.name:p.read_bytes() for p in self.sd.iterdir()}
+        (self.root/'args').unlink()
+        interpreter=self.root/'broken-python'
+        interpreter.write_text('#!/bin/sh\necho "broken interpreter" >&2\nexit 127\n')
+        interpreter.chmod(0o755)
+        self.env['CODEX_CC_TRIAGE_PYTHON_BIN']=str(interpreter)
+        for args in [('dispatch','review','review',self.base),('reply','review'),
+                     ('dispatch','plan','fresh')]:
+            with self.subTest(args=args):
+                p=self.cmd(['bash',SCRIPTS/'claude-thread.sh',*args],self.prompt)
+                self.assertEqual(p.returncode,9,p.stderr)
+                self.assertIn('Python 3.8 or newer',p.stderr)
+                self.assertFalse((self.root/'args').exists())
+                self.assertEqual({p.name:p.read_bytes() for p in self.sd.iterdir()},before)
+        self.assertEqual(self.cmd(['bash',SCRIPTS/'claude-thread.sh','status']).returncode,0)
+        self.assertEqual(self.cmd(['bash',SCRIPTS/'claude-thread.sh','new','review']).returncode,0)
+
+    def test_first_dispatch_with_missing_python_creates_no_state(self):
+        self.env['CODEX_CC_TRIAGE_PYTHON_BIN']=str(self.root/'missing-python')
+        p=self.dispatch()
+        self.assertEqual(p.returncode,9,p.stderr)
+        self.assertFalse(self.sd.exists())
+        self.assertFalse((self.repo/'.agent-state').exists())
+        self.assertFalse((self.root/'args').exists())
+
+    def test_archived_only_thread_is_visible_without_modifying_history(self):
+        self.approve()
+        self.assertEqual(self.cmd(['bash',SCRIPTS/'claude-thread.sh','new','review']).returncode,0)
+        archives=list(self.sd.glob('review.archive.*'))
+        self.assertEqual(len(archives),1)
+        before={p.name:p.read_bytes() for p in self.sd.iterdir()}
+        for args in [('status',),('status','review')]:
+            p=self.cmd(['bash',SCRIPTS/'claude-thread.sh',*args])
+            self.assertEqual(p.returncode,0,p.stderr)
+            self.assertIn(f'Archives: 1 file(s), {archives[0].stat().st_size} bytes',p.stdout)
+            self.assertIn(str(self.sd),p.stdout)
+            self.assertEqual({p.name:p.read_bytes() for p in self.sd.iterdir()},before)
+        self.assertEqual(self.cmd(['bash',SCRIPTS/'claude-thread.sh','status','absent']).returncode,6)
+
+    def test_corrupt_claim_can_recover_from_intact_snapshot_without_reset(self):
+        claim=self.begin()
+        candidate=self.sd/'review.candidate'; saved=candidate.read_text()
+        loop=(self.sd/'review.review-loop').read_bytes()
+        candidate.write_text(saved.replace(claim,'invalid-token'))
+        p=self.gate('record','review','foreground',claim)
+        self.assertEqual(p.returncode,10,p.stderr)
+        self.assertIn('INVALID_CLAIM_STATE',p.stderr)
+        self.assertEqual((self.sd/'review.review-loop').read_bytes(),loop)
+        candidate.write_text(saved)
+        self.assertEqual(self.dispatch().returncode,0)
+        self.assertEqual(self.gate('record','review','foreground',claim).returncode,0)
+        self.assertEqual(self.gate('check','review').returncode,0)
+        self.assertEqual((self.sd/'review.review-loop').read_bytes(),loop)
+
+    def test_mutating_reviewer_never_publishes_a_completed_result(self):
+        claim=self.begin()
+        self.env.update(FAKE_CLAUDE_MUTATE='1',FAKE_CLAUDE_PROJECT_DIR=str(self.repo))
+        p=self.dispatch()
+        self.assertEqual(p.returncode,5,p.stderr)
+        self.assertFalse((self.sd/'review.last-result').exists())
+        self.assertFalse((self.sd/'review.last-fingerprint').exists())
+        self.assertNotEqual(self.gate('check','review').returncode,0)
+        (self.repo/'mutable.txt').unlink()
+        p=self.gate('abort','review','tool-failure',claim)
+        self.assertEqual(p.returncode,10,p.stderr)
+        self.assertIn('ABORTED',p.stderr)
+
 if __name__=='__main__': unittest.main()

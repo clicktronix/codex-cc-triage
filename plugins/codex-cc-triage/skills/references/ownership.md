@@ -10,7 +10,9 @@ Ask only for a real product decision, access or waiver. Group pending decisions 
 continue available work. Architecture findings can require routine replanning, not
 another permission request. If review repeatedly discovers new problem classes, group
 their causes and revisit the design. A cap pauses paid review and delivery, not safe
-repairs. Never reset to seek an easier verdict.
+repairs. Report missing approval once; another review budget requires user authorization,
+reusing a decision already given. Never reset to seek an easier verdict. Routine replanning
+after divergence can use the remaining authorized budget without another permission question.
 
 Send the applicable contract routes, not the whole documentation tree. Claude safe mode
 does not auto-load CLAUDE.md/rules: ask it to follow relevant imports and scoped rules.

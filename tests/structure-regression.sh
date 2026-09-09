@@ -34,6 +34,18 @@ sed 's/allow_implicit_invocation: true/allow_implicit_invocation: false/' \
   "$agent_file" > "$agent_file.tmp" || exit 1
 mv "$agent_file.tmp" "$agent_file" || exit 1
 
+maintenance="$MUTANT/plugins/codex-cc-triage/skills/claude-thread/agents/openai.yaml"
+sed 's/allow_implicit_invocation: true/allow_implicit_invocation: false/' \
+  "$maintenance" > "$maintenance.tmp" || exit 1
+mv "$maintenance.tmp" "$maintenance" || exit 1
+if CODEX_CC_TRIAGE_REPO_ROOT="$MUTANT" \
+  python3 "$ROOT/tests/validate_structure.py" >/dev/null 2>&1; then
+  echo "FAIL disabled autonomous maintenance survived structure validation" >&2
+  exit 1
+fi
+echo "PASS disabled autonomous maintenance mutation is rejected"
+cp "$ROOT/plugins/codex-cc-triage/skills/claude-thread/agents/openai.yaml" "$maintenance" || exit 1
+
 workflow="$MUTANT/.github/workflows/validate.yml"
 sed 's#actions/checkout@v7#actions/checkout@v4#' "$workflow" > "$workflow.tmp" || exit 1
 printf '\n# actions/checkout@v7\n' >> "$workflow.tmp" || exit 1

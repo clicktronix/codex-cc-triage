@@ -55,7 +55,10 @@ failure, missing verdict, cap, divergence, candidate movement, or `REQUEST_CHANG
    CODEX_CC_REQUIRED_REVIEW APPROVE thread=<thread> head=<sha> tree=<sha> fingerprint=<sha256> base_sha=<sha> spec_path=<path>
    ```
 
-4. If dispatch fails before producing a completed round, release only that claim with
+4. For `budget_exhausted`, record the incomplete round with its claim token; it cannot
+   approve, and the attempt remains spent. Continue the retained session only within an
+   authorized budget and the remaining attempt cap. Do not abort to refund this attempt.
+   For other dispatch failures before producing a completed round, release only that claim with
    `review-state.sh abort <thread> <dispatch-failure|timeout|tool-failure> <claim-token>`. `abort`
    refuses a claim after any dispatch result was recorded and returns the unspent cap slot. A crash
    while publishing the returned slot remains fail-closed as `PENDING`.

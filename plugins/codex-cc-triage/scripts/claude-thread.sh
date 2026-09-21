@@ -16,7 +16,7 @@ CLAUDE_BIN="${CODEX_CC_TRIAGE_CLAUDE_BIN:-claude}"
 PYTHON_BIN="${CODEX_CC_TRIAGE_PYTHON_BIN:-python3}"
 MODEL="${CODEX_CC_TRIAGE_MODEL:-sonnet}"
 EFFORT="${CODEX_CC_TRIAGE_EFFORT:-}"
-BUDGET="${CODEX_CC_TRIAGE_MAX_BUDGET_USD:-1.00}"
+BUDGET="${CODEX_CC_TRIAGE_MAX_BUDGET_USD:-}"
 TIMEOUT_SECONDS="${CODEX_CC_TRIAGE_TIMEOUT_SECONDS:-900}"
 LOCK=""
 LOCK_RECLAIM=""
@@ -464,6 +464,9 @@ status_threads() {
       || [ -s "$STATE_DIR/$thread.last-error.json" ] \
       || [ -s "$STATE_DIR/$thread.last-error.stderr" ]; then
       state="failed"
+      if [ "$(cat "$STATE_DIR/$thread.failed" 2>/dev/null)" = budget_exhausted ]; then
+        state="budget_exhausted"
+      fi
     fi
     printf '%s\tmode=%s\tbase=%s\trounds=%s\tstate=%s\tsession=%s' \
       "$thread" "$mode" "$base" "$rounds" "$state" "$session"
@@ -581,6 +584,9 @@ run_claude() {
   local mode="$1"
   local thread="$2"
   local prompt="$3"
+  if [ -z "$BUDGET" ]; then
+    case "$mode" in review) BUDGET=5.00 ;; *) BUDGET=1.00 ;; esac
+  fi
   local target_ref="$4"
   local id_file="$STATE_DIR/$thread.id"
   local mode_file="$STATE_DIR/$thread.mode"
@@ -754,7 +760,6 @@ $prompt"
       && [ "$(cat "$TIMEOUT_STATUS" 2>/dev/null)" = "termination-failed" ]; then
       die 3 "Claude timeout cleanup could not confirm process-group termination; inspect $STATE_DIR/$thread.last-error.*"
     fi
-    die 3 "Claude exited $claude_rc; inspect $STATE_DIR/$thread.last-error.*"
   fi
 
   "$PYTHON_BIN" "$PARSER" \
@@ -763,6 +768,25 @@ $prompt"
     --result-output "$PARSED_RESULT" \
     --meta-output "$PARSED_META"
   parse_rc=$?
+  if [ "$parse_rc" -eq 3 ]; then
+    persist_failure "$thread" "$mode"
+    rm -f "$STATE_DIR/$thread.last-result" "$STATE_DIR/$thread.last-fingerprint" \
+      "$STATE_DIR/$thread.last-base" || die 7 "cannot clear incomplete review artifacts"
+    returned_id="$(cat "$PARSED_ID")"
+    if [ -n "$existing_id" ] && [ "$returned_id" != "$existing_id" ]; then
+      die 4 "resumed Claude session changed id from '$existing_id' to '$returned_id'"
+    fi
+    if [ "$mode" = review ]; then
+      atomic_write "$base_file" "$target_ref"
+    fi
+    atomic_write "$id_file" "$returned_id"
+    atomic_write "$STATE_DIR/$thread.last-prompt" "$prompt"
+    atomic_write "$STATE_DIR/$thread.failed" "budget_exhausted"
+    die 3 "Claude reached budget limit (\$$BUDGET); session '$returned_id' and pinned base retained, review incomplete. Continue this thread only within an authorized budget; inspect $STATE_DIR/$thread.last-error.*"
+  fi
+  if [ "$claude_rc" -ne 0 ]; then
+    die 3 "Claude exited $claude_rc; inspect $STATE_DIR/$thread.last-error.*"
+  fi
   if [ "$parse_rc" -ne 0 ]; then
     persist_failure "$thread" "$mode"
     die 4 "could not parse Claude output; inspect $STATE_DIR/$thread.last-error.*"

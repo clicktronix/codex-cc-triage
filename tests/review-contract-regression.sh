@@ -91,6 +91,24 @@ for duplicate_case in \
   fi
 done
 
+begin_required review-run-1 --base "$BASE" --spec docs/spec.md --cap 1
+export FAKE_CLAUDE_BUDGET_ERROR=1
+dispatch APPROVE "$(required_prompt)" 2>/dev/null; budget_rc=$?
+unset FAKE_CLAUDE_BUDGET_ERROR
+abort_output="$(reviewctl abort review-run-1 dispatch-failure "$CLAIM" 2>&1)"; abort_rc=$?
+record_required review-run-1 >/dev/null 2>&1; record_rc=$?
+reviewctl check review-run-1 >/dev/null 2>&1; check_rc=$?
+reviewctl begin review-run-1 --base "$BASE" --spec docs/spec.md --cap 1 >/dev/null 2>&1; cap_rc=$?
+if [ "$abort_rc" -eq 10 ] && printf '%s' "$abort_output" | grep -q ROUND_COMPLETED \
+  && [ "$budget_rc" -eq 3 ] && [ "$record_rc" -ne 0 ] && [ "$check_rc" -ne 0 ] \
+  && [ "$cap_rc" -eq 10 ] && [ -f "$STATE/review-run-1.id" ] \
+  && [ ! -f "$STATE/review-run-1.approved" ] && reason_is cap; then
+  ok "budget exhaustion retains identity without approval or renewing attempt cap"
+else
+  bad "budget failure weakened required-review gate ($budget_rc/$record_rc/$check_rc/$cap_rc)"
+fi
+reset_review
+
 begin_required review-run-1 --base "$BASE" --spec docs/spec.md --cap 5
 dispatch APPROVE "$(required_prompt)"
 OUT="$(record_required review-run-1 2>&1)"; rc=$?

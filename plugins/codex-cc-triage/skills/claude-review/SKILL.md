@@ -7,7 +7,9 @@ description: Use when the user explicitly asks Codex to have Claude Code review 
 
 Use Claude Code as a read-only reviewer. The wrapper builds a bounded branch snapshot containing
 committed, staged, unstaged, and untracked changes. It hard-fails rather than truncating a diff.
-Codex owns final triage and verification. Follow [ownership.md](../references/ownership.md).
+Codex owns final triage and verification. Review defaults to a $5 cap with Sonnet and
+provider-default effort; `CODEX_CC_TRIAGE_MAX_BUDGET_USD` overrides it. State the cap and
+effort before a paid call, and preserve any smaller budget already authorized. Follow [ownership.md](../references/ownership.md).
 
 ## Required delivery contract
 

@@ -31,7 +31,12 @@ def main() -> int:
     if not isinstance(payload, dict):
         print("codex-cc-triage: Claude JSON root must be an object", file=sys.stderr)
         return 1
-    if payload.get("is_error") is True:
+    budget_exhausted = (
+        payload.get("type") == "result"
+        and payload.get("subtype") == "error_max_budget_usd"
+        and payload.get("is_error") is True
+    )
+    if payload.get("is_error") is True and not budget_exhausted:
         print(
             f"codex-cc-triage: Claude reported an error: {payload.get('result', '')}",
             file=sys.stderr,
@@ -40,7 +45,7 @@ def main() -> int:
 
     session_id = payload.get("session_id")
     result = payload.get("result")
-    if not isinstance(session_id, str) or not isinstance(result, str):
+    if not isinstance(session_id, str) or (not budget_exhausted and not isinstance(result, str)):
         print(
             "codex-cc-triage: Claude JSON needs string session_id and result",
             file=sys.stderr,
@@ -61,6 +66,9 @@ def main() -> int:
         return 1
 
     args.id_output.write_text(f"{session_id}\n", encoding="utf-8")
+    if budget_exhausted:
+        # Identity is recoverable; this is never a completed review or a verdict.
+        return 3
     args.result_output.write_text(result, encoding="utf-8")
     cost = payload.get("total_cost_usd")
     turns = payload.get("num_turns")

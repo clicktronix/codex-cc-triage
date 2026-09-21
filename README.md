@@ -110,7 +110,7 @@ Environment variables:
 | `CODEX_CC_TRIAGE_MODEL` | `sonnet` | Claude model or alias |
 | `CODEX_CC_TRIAGE_EFFORT` | provider default | Optional CLI effort, capability-checked when supplied |
 | `CODEX_CC_TRIAGE_REFRESH_CAPABILITIES` | `0` | Set `1` to recheck help, including after changes behind a wrapper executable |
-| `CODEX_CC_TRIAGE_MAX_BUDGET_USD` | `1.00` | Per-call print-mode budget cap |
+| `CODEX_CC_TRIAGE_MAX_BUDGET_USD` | `5.00` review; `1.00` ask/plan | Print-mode budget cap; an explicit value overrides either default |
 | `CODEX_CC_TRIAGE_TIMEOUT_SECONDS` | `900` | Per-Claude-process wall-clock timeout |
 | `CODEX_CC_TRIAGE_TARGET_REF` | auto-detected | Default review base ref |
 | `CODEX_CC_TRIAGE_CONTEXT_LIMIT` | `5242880` | Maximum complete review context in bytes |
@@ -119,7 +119,14 @@ Environment variables:
 The wrapper capability-checks the flags it uses instead of relying on a hard-coded Claude Code
 version. The budget and timeout are independent caps: the first limits API spend and the second
 limits each process duration. Reported metadata includes requested model/effort separately from
-observed cost; a one-dollar cap is not a measured per-task price.
+observed cost; a cap is not a measured per-task price. Review gets more headroom because
+it inspects a complete candidate and affected consumers. Effort remains provider-default
+unless explicitly supplied. These defaults do not increase a previously authorized budget.
+
+Budget exhaustion is an incomplete review, not a verdict. The driver retains a validated
+Claude session ID and pinned base, reports `state=budget_exhausted`, and keeps raw diagnostics.
+Continue the same thread with `reply` or `dispatch` only within an authorized budget; there is
+no automatic retry or budget increase. Required-review attempt limits still apply.
 
 The packaging and explicit-skill metadata follow OpenAI's
 [plugin](https://developers.openai.com/plugins/build/plugins) and

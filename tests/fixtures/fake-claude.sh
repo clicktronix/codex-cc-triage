@@ -82,6 +82,16 @@ if [ "${FAKE_CLAUDE_STAGE:-0}" = "1" ]; then
   git -C "${FAKE_CLAUDE_PROJECT_DIR:?}" add tracked.txt
 fi
 
+if [ "${FAKE_CLAUDE_BUDGET_ERROR:-0}" = "1" ]; then
+  FAKE_SESSION="${FAKE_CLAUDE_RETURN_ID:-$session_id}" python3 - <<'JSON'
+import json, os
+print(json.dumps({"type": "result", "subtype": "error_max_budget_usd",
+                  "is_error": True, "session_id": os.environ["FAKE_SESSION"],
+                  "errors": ["Reached maximum budget"], "total_cost_usd": 0.26}))
+JSON
+  exit "${FAKE_CLAUDE_BUDGET_RC:-1}"
+fi
+
 if [ "${FAKE_CLAUDE_FAIL:-0}" = "1" ]; then
   echo "fake Claude stderr" >&2
   printf '{"is_error":true,"session_id":"%s","result":"FAKE_FAILURE"}\n' "$session_id"

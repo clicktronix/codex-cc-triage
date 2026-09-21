@@ -38,6 +38,12 @@ bash "<plugin-root>/scripts/claude-thread.sh" name "<ask|plan|review>" "<task-la
 
 ## Recovery
 
+For `state=budget_exhausted`, the session ID and review base are retained, but the review
+is incomplete. Continue with `reply` or `dispatch` on the same thread only within an
+authorized budget. Do not reset or infer approval from a partial result. Older plugin
+versions may retain identity only in `last-error.json`; do not start a fresh session
+silently when that state needs recovery.
+
 For `INVALID_CLAIM_STATE`, inspect the claim, loop, log and saved result; a malformed
 claim does not necessarily invalidate the budget. Restore an intact matching snapshot
 if available; never invent state fields or approval. If restoration is impossible, or

@@ -63,6 +63,105 @@ export CODEX_CC_TRIAGE_STATE_DIR="$REPO/$STATE_REL"
 EXCLUDE_BEFORE="$(cat "$REPO/.git/info/exclude" 2>/dev/null || true)"
 MAIN_BASE="$(git -C "$REPO" rev-parse main)"
 
+# No paid calls: exercise mode defaults and explicit authorization overrides.
+for mode in ask plan review; do
+  : > "$ARGS_LOG"
+  BRIDGE_ARGS=(dispatch "$mode" "default-$mode" main)
+  output="$(run_bridge "Default budget" env -u CODEX_CC_TRIAGE_MAX_BUDGET_USD 2>&1)"
+  rc=$?
+  expected=1.00
+  [ "$mode" != review ] || expected=5.00
+  actual="$(awk '/^--max-budget-usd$/ {getline; print; exit}' "$ARGS_LOG")"
+  if [ "$rc" -eq 0 ] && [ "$actual" = "$expected" ]; then
+    pass "$mode uses its default budget"
+  else
+    fail "$mode default budget (rc=$rc, budget=$actual, output=$output)"
+  fi
+done
+
+BRIDGE_ARGS=(dispatch review review-budget main)
+: > "$ARGS_LOG"
+output="$(run_bridge "Budget-limited review" env FAKE_CLAUDE_BUDGET_ERROR=1 2>&1)"
+rc=$?
+status_output="$(CODEX_CC_TRIAGE_PROJECT_DIR="$REPO" bash "$DRIVER" status review-budget)"
+if [ "$rc" -eq 3 ] && printf '%s' "$output" | grep -q 'reached budget limit ($0.25)' \
+  && [ "$(cat "$REPO/$STATE_REL/review-budget.id")" = 11111111-1111-4111-8111-111111111111 ] \
+  && [ "$(cat "$REPO/$STATE_REL/review-budget.base")" = "$MAIN_BASE" ] \
+  && [ ! -e "$REPO/$STATE_REL/review-budget.last-result" ] \
+  && [ ! -e "$REPO/$STATE_REL/review-budget.approved" ] \
+  && printf '%s' "$status_output" | grep -q 'rounds=0.*state=budget_exhausted' \
+  && [ "$(awk '/^--max-budget-usd$/ {getline; print; exit}' "$ARGS_LOG")" = 0.25 ]; then
+  pass "first budget error preserves identity/base without verdict and respects override"
+else
+  fail "first budget error (rc=$rc, output=$output, status=$status_output)"
+fi
+
+BRIDGE_ARGS=(reply review-budget)
+: > "$ARGS_LOG"
+output="$(run_bridge "Continue with existing authorization" env FAKE_CLAUDE_BUDGET_ERROR=1 2>&1)"
+rc=$?
+if [ "$rc" -eq 3 ] && grep -qx -- --resume "$ARGS_LOG" \
+  && [ "$(cat "$REPO/$STATE_REL/review-budget.failed")" = budget_exhausted ]; then
+  pass "repeated exhaustion resumes the same session and stays incomplete"
+else
+  fail "repeated exhaustion (rc=$rc, output=$output)"
+fi
+
+output="$(run_bridge "Reject mismatched identity" env FAKE_CLAUDE_BUDGET_ERROR=1 \
+  FAKE_CLAUDE_RETURN_ID=22222222-2222-4222-8222-222222222222 2>&1)"
+rc=$?
+if [ "$rc" -eq 4 ] && printf '%s' "$output" | grep -q 'session changed id' \
+  && [ "$(cat "$REPO/$STATE_REL/review-budget.id")" = 11111111-1111-4111-8111-111111111111 ]; then
+  pass "budget error cannot replace a resumed identity"
+else
+  fail "budget identity mismatch (rc=$rc, output=$output)"
+fi
+
+: > "$ARGS_LOG"
+output="$(run_bridge "Finish existing review" env 2>&1)"
+rc=$?
+if [ "$rc" -eq 0 ] && grep -qx -- --resume "$ARGS_LOG" \
+  && [ ! -e "$REPO/$STATE_REL/review-budget.failed" ] \
+  && [ ! -e "$REPO/$STATE_REL/review-budget.last-error.json" ] \
+  && [ "$(cat "$REPO/$STATE_REL/review-budget.last-result")" = FAKE_RESUME ]; then
+  pass "successful continuation clears failure and records the result"
+else
+  fail "successful continuation (rc=$rc, output=$output)"
+fi
+
+for budget_rc in 0 1; do
+  BRIDGE_ARGS=(dispatch review "budget-invalid-$budget_rc" main)
+  output="$(run_bridge "Invalid budget identity" env FAKE_CLAUDE_BUDGET_ERROR=1 \
+    FAKE_CLAUDE_RETURN_ID=not-a-uuid FAKE_CLAUDE_BUDGET_RC="$budget_rc" 2>&1)"
+  rc=$?
+  if [ "$rc" -ne 0 ] && [ ! -e "$REPO/$STATE_REL/budget-invalid-$budget_rc.id" ]; then
+    pass "invalid budget identity rejected with Claude exit $budget_rc"
+  else
+    fail "invalid budget identity accepted (rc=$rc, output=$output)"
+  fi
+done
+
+BRIDGE_ARGS=(dispatch review budget-zero-exit main)
+output="$(run_bridge "Budget error with exit zero" env FAKE_CLAUDE_BUDGET_ERROR=1 FAKE_CLAUDE_BUDGET_RC=0 2>&1)"
+rc=$?
+if [ "$rc" -eq 3 ] && [ -f "$REPO/$STATE_REL/budget-zero-exit.id" ] \
+  && [ ! -e "$REPO/$STATE_REL/budget-zero-exit.last-result" ]; then
+  pass "structured budget error remains incomplete even with exit zero"
+else
+  fail "zero-exit budget error (rc=$rc, output=$output)"
+fi
+
+cp "$REPO/mutable.txt" "$TMP/before-budget-mutation"
+BRIDGE_ARGS=(dispatch review budget-mutation main)
+output="$(run_bridge "Mutation overrides recovery" env FAKE_CLAUDE_BUDGET_ERROR=1 FAKE_CLAUDE_MUTATE=1 2>&1)"
+rc=$?
+if [ "$rc" -eq 5 ] && [ ! -e "$REPO/$STATE_REL/budget-mutation.id" ]; then
+  pass "repository mutation blocks budget recovery"
+else
+  fail "budget mutation guard (rc=$rc, output=$output)"
+fi
+cp "$TMP/before-budget-mutation" "$REPO/mutable.txt"
+
 name_output="$(CODEX_CC_TRIAGE_PROJECT_DIR="$REPO" bash "$DRIVER" name review 2>&1)"
 rc=$?
 if [ "$rc" -eq 0 ] && printf '%s' "$name_output" \

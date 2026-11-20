@@ -1,27 +1,19 @@
-# Owning workflow contract
+# Working with a Claude opinion
 
-The caller owns spec, implementation, native tasks, verification and delivery. Return
-validated findings; do not create issues/tasks per finding, invent waivers or launch
-nested workers/reviewers. The owner fixes confirmed defects, regressions and dependencies
-needed for the agreed outcome in the current task. File provenance, severity and finding count
-do not decide scope; tracking a defect does not resolve it.
+The owning agent chooses the question, runs verification, decides findings and holds publication authority. Select a paid skill for a requested Claude opinion or a review already authorized for this task. Reuse a known budget and model choice. If another paid call is needed beyond that authority, ask once and continue independent work.
 
-Ask only for a real product decision, access or waiver. Group pending decisions and
-continue available work. Architecture findings can require routine replanning, not
-another permission request. If review repeatedly discovers new problem classes, group
-their causes and revisit the design. A cap pauses paid review and delivery, not safe
-repairs. Report missing approval once; another review budget requires user authorization,
-reusing a decision already given. Never reset to seek an easier verdict. Routine replanning
-after divergence can use the remaining authorized budget without another permission question.
+## Budget and context
 
-Send the applicable contract routes, not the whole documentation tree. Claude safe mode
-does not auto-load CLAUDE.md/rules: ask it to follow relevant imports and scoped rules.
-Supply observed test/runtime evidence with its candidate, environment and limits.
-Claude has only Read/Glob/Grep; the owner runs missing tests, browser or DB checks.
-Reuse valid evidence until its inputs change, and coordinate heavy checks in the owner.
-A reviewer verdict is not proof of migration application or deployed runtime health.
+The default per-process ceilings are $5 for review and $1 for ask or plan, including discussions that use those modes. The default model is Sonnet with provider-default effort. State the ceiling and effort for the intended run, preserve a lower authorized ceiling through `CODEX_CC_TRIAGE_MAX_BUDGET_USD`, and pass authorized model or effort overrides through `CODEX_CC_TRIAGE_MODEL` and `CODEX_CC_TRIAGE_EFFORT`. A per-call limit and a round limit are separate. Charge additional calls to the same authorized total. Values are ceilings, not observed spend.
 
-Use only an explicitly requested opinion or a bounded call already authorized by the
-owning workflow, with a task, purpose and budget. Keep final markers exact; summarize
-changed findings and retain the full thread log. Preserve pinned base and conversation
-when integrating an advanced target. Independent future work is the owner's decision.
+Resolve the plugin root two directories above the active skill directory. Prefer the thread already identified in the current task. For a new thread run `scripts/claude-thread.sh name ask|plan|review [task-label]` with the chosen mode. Supply a distinct task label for an integration branch, detached checkout, standalone context or unrelated task on the same branch.
+
+## Dispatch
+
+Use the public driver and send the prompt on stdin. Supply relevant scope, available evidence, and applicable rule paths. Claude has read-only Read/Glob/Grep tools. Codex runs delegated tests, looks up first-party sources and returns the relevant excerpt. Release, external comments, changes of scope and acceptance waivers belong to the owner.
+
+- `--once` requests one pass on the named persistent conversation. `--oneshot` means one ephemeral response: append `--oneshot` to the advisory dispatch. Return the answer directly.
+- For an authorized background advisory call, start the same driver once using the host's yielding process tool. Continue observing that process by its returned session handle. If no such tool is available, wait in the foreground. On an interrupted wait inspect thread status before considering a retry. Required review uses the foreground result and its claim.
+- A failed resume retains its identity. Surface the driver diagnostic, resolve what it asks for and use the same thread. If the session must be replaced or the authorization expanded, tell the owner why. After a budget-exhausted response use the recorded status and remaining authorization.
+
+Return validated findings and the checks that support them. A reviewer can request evidence within the original task. Address confirmed defects and their causes across affected consumers. After a changed candidate, refresh the affected evidence. Group genuine decisions for the user and continue the parts already authorized.

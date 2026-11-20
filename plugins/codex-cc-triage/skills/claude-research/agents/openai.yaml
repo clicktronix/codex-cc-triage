@@ -1,0 +1,6 @@
+interface:
+  display_name: "Claude Research"
+  short_description: "Check a sourced question with Claude"
+  default_prompt: "Use $codex-cc-triage:claude-research to investigate this question and assess the evidence."
+policy:
+  allow_implicit_invocation: true

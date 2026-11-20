@@ -1,0 +1,6 @@
+interface:
+  display_name: "Claude Debate"
+  short_description: "Compare rival designs against evidence"
+  default_prompt: "Use $codex-cc-triage:claude-debate to debate the competing approaches and their trade-offs."
+policy:
+  allow_implicit_invocation: true

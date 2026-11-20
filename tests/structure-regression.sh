@@ -18,21 +18,19 @@ cp -R \
   "$MUTANT/" || exit 1
 
 agent_file="$MUTANT/plugins/codex-cc-triage/skills/claude-plan/agents/openai.yaml"
-sed 's/allow_implicit_invocation: false/allow_implicit_invocation: true/' \
+sed 's/allow_implicit_invocation: true/allow_implicit_invocation: false/' \
   "$agent_file" > "$agent_file.tmp" || exit 1
 mv "$agent_file.tmp" "$agent_file" || exit 1
 
 if CODEX_CC_TRIAGE_REPO_ROOT="$MUTANT" \
   python3 "$ROOT/tests/validate_structure.py" >/dev/null 2>&1; then
-  echo "FAIL explicit-invocation mutation survived structure validation" >&2
+  echo "FAIL hidden plan skill survived structure validation" >&2
   exit 1
 fi
 
-echo "PASS explicit-invocation mutation is rejected"
+echo "PASS hidden plan skill is rejected"
 
-sed 's/allow_implicit_invocation: true/allow_implicit_invocation: false/' \
-  "$agent_file" > "$agent_file.tmp" || exit 1
-mv "$agent_file.tmp" "$agent_file" || exit 1
+cp "$ROOT/plugins/codex-cc-triage/skills/claude-plan/agents/openai.yaml" "$agent_file" || exit 1
 
 maintenance="$MUTANT/plugins/codex-cc-triage/skills/claude-thread/agents/openai.yaml"
 sed 's/allow_implicit_invocation: true/allow_implicit_invocation: false/' \

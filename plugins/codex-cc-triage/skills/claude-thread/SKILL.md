@@ -15,6 +15,7 @@ not as the `skills/` directory itself, then run one operation:
 ```bash
 bash "<plugin-root>/scripts/claude-thread.sh" status
 bash "<plugin-root>/scripts/claude-thread.sh" status "<thread>"
+bash "<plugin-root>/scripts/claude-thread.sh" resolve [known-or-explicit-name]
 bash "<plugin-root>/scripts/claude-thread.sh" new "<thread>"
 bash "<plugin-root>/scripts/claude-thread.sh" name "<ask|plan|review>" "<task-label>"
 ```
@@ -24,6 +25,7 @@ bash "<plugin-root>/scripts/claude-thread.sh" name "<ask|plan|review>" "<task-la
   `gate_eligible`, `verdict`, `reason`, and claim-expiry fields, including `PENDING`, `STALE`,
   `CAP_REACHED`, and `DIVERGED`. It also shows retained archive count, bytes and location,
   including a named thread whose live state was reset. Use `review-state.sh check` for approval.
+- `resolve` selects a requested or sole eligible thread, including a renewed required contract. Explicit names can refer to a linked worktree. Ask for a choice on ambiguity.
 - `name` normalizes a branch or task label into the exact ASCII thread name accepted by the driver.
 - `new` archives the named thread's plugin state before clearing its ID, log, context,
   diagnostics and required-review lifecycle, including the attempt count and approval. It
@@ -32,7 +34,7 @@ bash "<plugin-root>/scripts/claude-thread.sh" name "<ask|plan|review>" "<task-la
   `$codex-cc-triage:claude-review` call with that name starts a fresh Claude session.
 - Never reset a thread while another call owns its active lock or required-review mutex. The driver
   returns exit 10. An abandoned claim with a dead lease can be aborted and resumed without reset.
-- Thread and required-review state lives under the repository common Git directory reported by
+- In a Git checkout thread and required-review state lives under the common Git directory reported by
   `scripts/state-dir.sh`, survives disposable-worktree removal, and may contain prompts and review
   output. It is outside the worktree and Git index; do not copy it into committed files.
 

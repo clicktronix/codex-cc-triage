@@ -28,6 +28,7 @@ record_required() {
 }
 dispatch() {
   result="$1"; prompt="$2"
+  [ "$result" != REQUEST_CHANGES ] || result=$'file.txt:1 Fix the candidate.\nREQUEST_CHANGES'
   printf '%s\n' "$prompt" | env \
     CODEX_CC_TRIAGE_PROJECT_DIR="$REPO" CODEX_CC_TRIAGE_STATE_DIR="$STATE" \
     CODEX_CC_TRIAGE_CLAUDE_BIN="$FAKE" CODEX_CC_TRIAGE_MODEL=haiku \
@@ -166,13 +167,13 @@ fi
 reset_review
 begin_required review-run-1 --base "$BASE" --spec docs/spec.md --cap 1
 dispatch REQUEST_CHANGES "$(required_prompt)"
-dispatch APPROVE "$(required_prompt)"
+dispatch APPROVE "$(required_prompt)" 2>/dev/null; duplicate_rc=$?
 record_required review-run-1 >/dev/null 2>&1; rc=$?
 stale_reason="$(sed -n 's/^reason=//p' "$STATE/review-run-1.review-state")"
 reviewctl check review-run-1 >/dev/null 2>&1; check_rc=$?
 reviewctl begin review-run-1 --base "$BASE" --spec docs/spec.md --cap 1 \
   >/dev/null 2>&1; cap_rc=$?
-if [ "$rc" -eq 11 ] && [ "$stale_reason" = round_counter_mismatch ] \
+if [ "$duplicate_rc" -eq 10 ] && [ "$rc" -eq 10 ] && [ "$stale_reason" = cap ] \
     && [ "$check_rc" -eq 10 ] && [ "$cap_rc" -eq 10 ] \
     && grep -qxF status=CAP_REACHED "$STATE/review-run-1.review-state"; then
   ok "two dispatches cannot turn a cap-1 REQUEST_CHANGES into approval"
@@ -304,9 +305,11 @@ dispatch APPROVE "$(required_prompt)"
 CODEX_CC_TRIAGE_PROJECT_DIR="$REPO" CODEX_CC_TRIAGE_STATE_DIR="$STATE" \
   CODEX_CC_TRIAGE_PYTHON_BIN=/bin/false \
   bash "$REVIEW_STATE" record review-run-1 foreground "$CLAIM" >/dev/null 2>&1; rc=$?
-[ "$rc" -eq 11 ] && reason_is fingerprint_unavailable \
-  && ok "unavailable fingerprint has a distinct stale reason" \
-  || bad "unavailable fingerprint stale reason"
+if [ "$rc" -eq 7 ] && grep -qxF status=PENDING "$STATE/review-run-1.review-state" && record_required review-run-1 >/dev/null; then
+  ok "unavailable fingerprint preserves the paid result for record after repair"
+else
+  bad "unavailable fingerprint lost the paid result"
+fi
 
 reset_review
 begin_required review-run-1 --base "$BASE" --spec docs/spec.md --cap 5
@@ -350,7 +353,14 @@ record_required review-run-1 >/dev/null 2>&1; rc=$?
 
 reset_review
 begin_required review-run-1 --base "$BASE" --spec docs/spec.md --cap 5
-dispatch APPROVE "Review without the required scope."
+dispatch APPROVE "Review without the required scope." 2>/dev/null; scope_rc=$?
+if [ "$scope_rc" -eq 14 ] && grep -qxF launches=0 "$STATE/review-run-1.review-loop"; then
+  ok "wrong prompt fails before a billable launch"
+else
+  bad "wrong prompt passed preflight or spent a call"
+fi
+dispatch APPROVE "$(required_prompt)"
+printf 'Review without the required scope.\n' > "$STATE/review-run-1.last-prompt"
 record_required review-run-1 >/dev/null 2>&1; rc=$?
 [ "$rc" -eq 11 ] && reason_is prompt_scope_mismatch \
   && ok "prompt scope mismatch has a distinct stale reason" \

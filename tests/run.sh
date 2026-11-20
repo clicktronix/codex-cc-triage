@@ -28,6 +28,7 @@ bash "$ROOT/tests/driver-regression.sh"
 bash "$ROOT/tests/lock-lib-regression.sh"
 bash "$ROOT/tests/review-contract-regression.sh"
 python3 "$ROOT/tests/product-integrity.py"
+python3 "$ROOT/tests/test_advisory_routing.py"
 python3 "$ROOT/tests/validate_structure.py"
 bash "$ROOT/tests/structure-regression.sh"
 bash "$ROOT/tests/timeout-runner-regression.sh"
@@ -39,18 +40,22 @@ for consumer in claude-thread.sh review-state.sh state-dir.sh; do
   grep -qF 'lock-lib.sh' "$ROOT/plugins/codex-cc-triage/scripts/$consumer"
   grep -qF 'codex_cc_lock_acquire_reclaim' "$ROOT/plugins/codex-cc-triage/scripts/$consumer"
 done
-if rg -n "stat -[cf].*'%[Ym]'" \
+if grep -En "stat -[cf].*'%[Ym]'" \
     "$ROOT/plugins/codex-cc-triage/scripts/claude-thread.sh" \
     "$ROOT/plugins/codex-cc-triage/scripts/review-state.sh" \
     "$ROOT/plugins/codex-cc-triage/scripts/state-dir.sh"; then
   echo "FAIL duplicated lock timestamp logic" >&2
   exit 1
+else
+  [[ $? == 1 ]] || exit 1
 fi
 echo "PASS shared lock primitives"
 
-if rg -n '\[TODO:' "$ROOT/plugins"; then
+if grep -REn '\[TODO:' "$ROOT/plugins"; then
   echo "FAIL TODO placeholder found" >&2
   exit 1
+else
+  [[ $? == 1 ]] || exit 1
 fi
 
 echo "PASS all"

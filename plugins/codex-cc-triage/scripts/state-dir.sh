@@ -20,10 +20,9 @@ case "${1:-}" in
   *) echo "usage: state-dir.sh [--read-only]" >&2; exit 1 ;;
 esac
 
-if ! ROOT="$(git -C "${CODEX_CC_TRIAGE_PROJECT_DIR:-$PWD}" rev-parse --show-toplevel 2>/dev/null)" || [ -z "$ROOT" ]; then
-  echo "not inside a git repository" >&2
-  exit 7
-fi
+ROOT="$(cd "${CODEX_CC_TRIAGE_PROJECT_DIR:-$PWD}" 2>/dev/null && pwd -P)" || { echo "cannot enter project directory" >&2; exit 7; }
+GIT_ROOT="$(git -C "$ROOT" rev-parse --show-toplevel 2>/dev/null)" || GIT_ROOT=""
+[ -z "$GIT_ROOT" ] || ROOT="$GIT_ROOT"
 cd "$ROOT" || exit 7
 
 assert_single_link() {
@@ -75,6 +74,21 @@ if [ -n "${CODEX_CC_TRIAGE_STATE_DIR:-}" ]; then
         || { rm -f "$IGNORE_TMP" 2>/dev/null; exit 7; }
     fi
   fi
+  printf '%s\n' "$STATE_DIR"
+  exit 0
+fi
+
+if [ -z "$GIT_ROOT" ]; then
+  state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
+  case "$state_home" in /*) ;; *) echo "XDG_STATE_HOME must be absolute" >&2; exit 7 ;; esac
+  context_key="$(printf '%s' "$ROOT" | git hash-object --stdin)" || exit 7
+  parent="$state_home/codex-cc-triage"
+  contexts="$parent/contexts"
+  STATE_DIR="$contexts/$context_key"
+  for path in "$parent" "$contexts" "$STATE_DIR"; do
+    assert_directory_or_missing "$path" "standalone state directory"
+  done
+  $READ_ONLY || mkdir -p "$STATE_DIR" || exit 7
   printf '%s\n' "$STATE_DIR"
   exit 0
 fi

@@ -11,7 +11,9 @@ PARSER="$SCRIPT_DIR/parse_claude_json.py"
 TIMEOUT_RUNNER="$SCRIPT_DIR/run_with_timeout.py"
 STATE_HELPER="$SCRIPT_DIR/state-dir.sh"
 STATE_REL=".agent-state/codex-cc-triage"
-ROOT="${CODEX_CC_TRIAGE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || true)}"
+ROOT="${CODEX_CC_TRIAGE_PROJECT_DIR:-$PWD}"
+ONESHOT=false
+EPHEMERAL_DIR=""
 CLAUDE_BIN="${CODEX_CC_TRIAGE_CLAUDE_BIN:-claude}"
 PYTHON_BIN="${CODEX_CC_TRIAGE_PYTHON_BIN:-python3}"
 MODEL="${CODEX_CC_TRIAGE_MODEL:-sonnet}"
@@ -40,12 +42,12 @@ die() {
   exit "$code"
 }
 
-[ -n "$ROOT" ] || die 7 "run this skill inside a Git repository"
-cd "$ROOT" 2>/dev/null || die 7 "cannot enter repository root '$ROOT'"
-git rev-parse --show-toplevel >/dev/null 2>&1 || die 7 "not a Git repository: '$ROOT'"
-ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || die 7 "cannot resolve repository root"
-cd "$ROOT" 2>/dev/null || die 7 "cannot enter repository root '$ROOT'"
-ROOT="$(pwd -P)" || die 7 "cannot canonicalize repository root"
+cd "$ROOT" 2>/dev/null || die 7 "cannot enter project directory '$ROOT'"
+GIT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || GIT_ROOT=""
+[ -z "$GIT_ROOT" ] || cd "$GIT_ROOT" || die 7 "cannot enter repository root"
+ROOT="$(pwd -P)" || die 7 "cannot canonicalize project directory"
+REQUIRED_RUNTIME=false
+[ -z "$GIT_ROOT" ] || REQUIRED_RUNTIME=true
 
 STATE_DIR=""
 CONTEXT_DIR="$ROOT/$STATE_REL"
@@ -55,6 +57,7 @@ prepare_state_dir() {
   if [ "$read_only" = true ]; then
     STATE_DIR="$(bash "$STATE_HELPER" --read-only)" \
       || die 7 "cannot resolve persistent thread state"
+    if [ -z "$GIT_ROOT" ]; then CONTEXT_DIR="$STATE_DIR"; fi
     [ -n "$STATE_DIR" ] || die 7 "thread state path is empty"
     [ ! -L "$STATE_DIR" ] || die 7 "refusing symlinked state directory: $STATE_DIR"
     [ ! -e "$STATE_DIR" ] || [ -d "$STATE_DIR" ] \
@@ -65,6 +68,7 @@ prepare_state_dir() {
     || die 7 "cannot resolve persistent thread state"
   [ ! -L "$STATE_DIR" ] || die 7 "refusing symlinked state directory: $STATE_DIR"
   [ -d "$STATE_DIR" ] || die 7 "state path is not a directory: $STATE_DIR"
+  if [ -z "$GIT_ROOT" ]; then CONTEXT_DIR="$STATE_DIR"; return 0; fi
   [ ! -L "$ROOT/.agent-state" ] || die 7 "refusing symlinked context parent"
   [ ! -L "$CONTEXT_DIR" ] || die 7 "refusing symlinked context directory"
   [ ! -e "$CONTEXT_DIR" ] || [ -d "$CONTEXT_DIR" ] \
@@ -116,8 +120,8 @@ assert_directory_or_missing() {
 assert_thread_files_safe() {
   local thread="$1"
   local suffix path
-  for suffix in id mode base log last-prompt last-result last-fingerprint \
-      candidate review-state review-loop approved last-base failed last-error.json last-error.stderr last-stderr; do
+  for suffix in id mode base log worktree last-prompt last-result last-fingerprint \
+      claim-prep candidate review-state review-loop approved last-base failed last-error.json last-error.stderr last-stderr; do
     path="$STATE_DIR/$thread.$suffix"
     [ ! -L "$path" ] || die 7 "refusing symlinked thread state: $path"
     [ ! -e "$path" ] || [ -f "$path" ] || die 7 "thread state is not a regular file: $path"
@@ -193,7 +197,8 @@ PY
 }
 
 check_runtime() {
-  local help_output auth_output missing_flag rc capability_key capability_file
+  local help_output auth_output missing_flag rc capability_key capability_file persistence_flag=""
+  if $ONESHOT; then persistence_flag=--no-session-persistence; fi
   command -v "$CLAUDE_BIN" >/dev/null 2>&1 \
     || die 9 "Claude Code CLI was not found: '$CLAUDE_BIN'"
 
@@ -251,7 +256,7 @@ for flag in sys.argv[1:]:
     --max-budget-usd \
     --output-format \
     --resume \
-    --name ${EFFORT:+--effort})" || die 9 "cannot validate Claude Code CLI capabilities"
+    --name ${EFFORT:+--effort} ${persistence_flag:+$persistence_flag})" || die 9 "cannot validate Claude Code CLI capabilities"
   [ -z "$missing_flag" ] \
     || die 9 "Claude Code CLI does not support required flag: $missing_flag"
 
@@ -325,6 +330,7 @@ cleanup() {
   [ -z "$CAPTURE_STATUS" ] || rm -f "$CAPTURE_STATUS"
   [ -z "$LOCK" ] || codex_cc_lock_release_owned "$LOCK" pid "$$"
   [ -z "$LOCK_RECLAIM" ] || codex_cc_lock_release_owned "$LOCK_RECLAIM" pid "$$"
+  [ -z "$EPHEMERAL_DIR" ] || rm -rf -- "$EPHEMERAL_DIR"
 }
 
 trap cleanup EXIT
@@ -367,14 +373,7 @@ acquire_lock() {
   [ -d "$LOCK" ] || die 10 "thread lock changed concurrently: $thread"
   assert_regular_or_missing "$LOCK/pid" "thread lock owner"
   owner="$(cat "$LOCK/pid" 2>/dev/null || true)"
-  case "$owner" in
-    [1-9]|[1-9][0-9]*)
-      kill -0 "$owner" 2>/dev/null \
-        && die 10 "thread is active: $thread (pid $owner)"
-      ;;
-    '') ;;
-    *) ;;
-  esac
+  lock_is_stale "$LOCK" || die 10 "thread is active: $thread (pid ${owner:-pending})"
   stale="$LOCK.stale.$$"
   [ ! -e "$stale" ] && [ ! -L "$stale" ] \
     || die 7 "stale thread lock path already exists: $stale"
@@ -413,9 +412,69 @@ detect_target_ref() {
   printf '%s\n' "HEAD"
 }
 
+live_thread() {
+  local lease="$STATE_DIR/$1.active" pid
+  [ -d "$lease" ] || return 1
+  codex_cc_lock_assert_safe "$lease" pid || die 7 "unsafe thread lease: $1"
+  pid="$(cat "$lease/pid" 2>/dev/null)" || return 1
+  case "$pid" in ''|0*|*[!0-9]*) return 1 ;; esac
+  [ "${#pid}" -le 12 ] && kill -0 "$pid" 2>/dev/null
+}
+
+has_review_state() {
+  local stem="$STATE_DIR/$1"
+  [ -f "$stem.review-loop" ] || [ -f "$stem.claim-prep" ] || [ -f "$stem.candidate" ] \
+    || [ -f "$stem.review-state" ] || [ -f "$stem.approved" ]
+}
+
+thread_names() {
+  local path file name seen='|'
+  for path in "$STATE_DIR"/*.id "$STATE_DIR"/*.mode "$STATE_DIR"/*.candidate "$STATE_DIR"/*.claim-prep \
+      "$STATE_DIR"/*.review-loop "$STATE_DIR"/*.review-state "$STATE_DIR"/*.approved "$STATE_DIR"/*.active; do
+    [ -e "$path" ] || continue
+    file="${path##*/}"; name="${file%.*}"
+    case "$seen" in *"|$name|"*) continue ;; esac
+    validate_thread "$name"
+    if [ "${file##*.}" = active ]; then live_thread "$name" || continue; fi
+    assert_thread_files_safe "$name"
+    seen="$seen$name|"
+    printf '%s\n' "$name"
+  done
+}
+
+resolve_thread() {
+  local wanted="${1:-}" names name owner choices=() available=() uncertain=false
+  [ -z "$wanted" ] || validate_thread "$wanted"
+  names="$(thread_names)" || exit $?
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    # A failed advisory launch with no session has nothing to resume.
+    [ -s "$STATE_DIR/$name.id" ] || has_review_state "$name" || live_thread "$name" || continue
+    available+=("$name")
+    if [ -n "$wanted" ]; then
+      [ "$wanted" != "$name" ] || { echo "$name"; return; }
+      continue
+    fi
+    owner="$(cat "$STATE_DIR/$name.worktree" 2>/dev/null || true)"
+    if [ -n "$owner" ] && [ "$owner" != "$ROOT" ]; then continue; fi
+    if [ -z "$owner" ] && [ -n "$GIT_ROOT" ] && [ ! -f "$CONTEXT_DIR/$name.context.md" ]; then
+      # Legacy common-Git sessions did not record a checkout. An explicit
+      # selection can resume one even after its original worktree was removed.
+      uncertain=true
+    fi
+    choices+=("$name")
+  done <<< "$names"
+  if [ -n "$wanted" ]; then die 6 "no resumable thread '$wanted'. Available: ${available[*]:-none}"; fi
+  case "${#choices[@]}" in
+    0) die 6 "no resumable thread in this checkout. Available: ${available[*]:-none}" ;;
+    1) if ! $uncertain; then echo "${choices[0]}"; return; fi ;;
+  esac
+  die 8 "choose a thread: ${choices[*]}"
+}
+
 status_threads() {
   local requested="${1:-}"
-  local found=0 state_file thread mode base session rounds state seen='|'
+  local found=0 names thread mode base session rounds state activity last
   local required_file required_status required_verdict required_gate required_reason required_expiry
   local archive archive_count=0 archive_bytes=0 size
   for archive in "$STATE_DIR"/*.archive.*; do
@@ -427,24 +486,16 @@ status_threads() {
     archive_count=$((archive_count + 1))
     archive_bytes=$((archive_bytes + size))
   done
-  for state_file in "$STATE_DIR"/*.id "$STATE_DIR"/*.mode "$STATE_DIR"/*.review-state; do
-    [ -f "$state_file" ] || continue
-    thread="$(basename "$state_file")"
-    thread="${thread%.id}"
-    thread="${thread%.mode}"
-    thread="${thread%.review-state}"
-    case "$seen" in
-      *"|$thread|"*) continue ;;
-    esac
-    seen="$seen$thread|"
-    validate_thread "$thread"
-    assert_thread_files_safe "$thread"
+  names="$(thread_names)" || exit $?
+  while IFS= read -r thread; do
+    [ -n "$thread" ] || continue
     if [ -n "$requested" ] && [ "$thread" != "$requested" ]; then
       continue
     fi
     found=1
     required_file="$STATE_DIR/$thread.review-state"
     required_status="$(sed -n 's/^status=//p' "$required_file" 2>/dev/null | head -1)"
+    if [ -z "$required_status" ] && has_review_state "$thread"; then required_status=INCOMPLETE; fi
     required_verdict="$(sed -n 's/^verdict=//p' "$required_file" 2>/dev/null | head -1)"
     required_gate="$(sed -n 's/^gate_eligible=//p' "$required_file" 2>/dev/null | head -1)"
     required_reason="$(sed -n 's/^reason=//p' "$required_file" 2>/dev/null | head -1)"
@@ -468,15 +519,22 @@ status_threads() {
         state="budget_exhausted"
       fi
     fi
+    if live_thread "$thread"; then state="busy"; fi
     printf '%s\tmode=%s\tbase=%s\trounds=%s\tstate=%s\tsession=%s' \
       "$thread" "$mode" "$base" "$rounds" "$state" "$session"
+    for activity in log id active; do
+      if [ -e "$STATE_DIR/$thread.$activity" ]; then
+        last="$(codex_cc_lock_mtime_epoch "$STATE_DIR/$thread.$activity")" && printf '\tlast_activity=%s' "$last"
+        break
+      fi
+    done
     if [ -n "$required_status" ]; then
       printf '\trequired=%s\tgate_eligible=%s\tverdict=%s\treason=%s\tclaim_expires_at=%s' \
         "$required_status" "${required_gate:-?}" "${required_verdict:-NONE}" \
         "${required_reason:--}" "${required_expiry:--}"
     fi
     printf '\n'
-  done
+  done <<< "$names"
   if [ "$found" -eq 0 ]; then
     if [ -n "$requested" ] && [ "$archive_count" -eq 0 ]; then
       die 6 "thread does not exist: $requested"
@@ -492,7 +550,8 @@ reset_thread() {
   validate_thread "$thread"
   assert_thread_files_safe "$thread"
   acquire_lock "$thread"
-  for suffix in id mode base log candidate review-state review-loop approved last-prompt last-result last-fingerprint last-base failed last-error.json last-error.stderr last-stderr; do
+  if ! $REQUIRED_RUNTIME && has_review_state "$thread"; then die 7 "reset this review in its Git repository"; fi
+  for suffix in id mode base log worktree claim-prep candidate review-state review-loop approved last-prompt last-result last-fingerprint last-base failed last-error.json last-error.stderr last-stderr; do
     source_file="$STATE_DIR/$thread.$suffix"
     [ -f "$source_file" ] || continue
     archive_files+=("$thread.$suffix")
@@ -504,14 +563,17 @@ reset_thread() {
   fi
   # review-state owns and generation-checks its own mutex. Let reset acquire it
   # so a dead lock can be reclaimed safely; a live operation still fails closed.
-  CODEX_CC_TRIAGE_REVIEW_RESET_LEASE_PID="$$" \
-    bash "$SCRIPT_DIR/review-state.sh" reset "$thread" >/dev/null \
-    || die $? "cannot reset required-review state for '$thread'"
+  if $REQUIRED_RUNTIME; then
+    CODEX_CC_TRIAGE_REVIEW_RESET_LEASE_PID="$$" \
+      bash "$SCRIPT_DIR/review-state.sh" reset "$thread" >/dev/null \
+      || die $? "cannot reset required-review state for '$thread'"
+  fi
   rm -f \
     "$STATE_DIR/$thread.id" \
     "$STATE_DIR/$thread.mode" \
     "$STATE_DIR/$thread.base" \
     "$STATE_DIR/$thread.log" \
+    "$STATE_DIR/$thread.worktree" \
     "$CONTEXT_DIR/$thread.context.md" \
     "$STATE_DIR/$thread.last-prompt" \
     "$STATE_DIR/$thread.last-result" \
@@ -561,15 +623,21 @@ append_log() {
   assert_thread_files_safe "$thread"
   {
     printf '\n## %s mode=%s\n\n' "$(date -u +%FT%TZ)" "$mode"
-    printf '### prompt\n\n%s\n\n' "$prompt"
-    printf '### response\n\n%s\n\n### metadata\n\n%s\n' "$result" "$metadata"
+    # Only driver-written headings count rounds. A quoted conversation can
+    # itself contain any number of headings in the prompt or the answer.
+    printf '### prompt\n\n'
+    sed 's/^/    /' <<< "$prompt"
+    printf '\n### response\n\n'
+    sed 's/^/    /' <<< "$result"
+    printf '\n### metadata\n\n%s\n' "$metadata"
   } >> "$STATE_DIR/$thread.log" || die 7 "cannot append thread log"
 }
 
 atomic_write() {
   local destination="$1"
   local content="$2"
-  local temporary="$destination.tmp.$$"
+  local temporary
+  temporary="$(mktemp "$destination.tmp.XXXXXX")" || die 7 "cannot create temporary state for '$destination'"
   if ! printf '%s\n' "$content" > "$temporary"; then
     rm -f "$temporary"
     die 7 "cannot write temporary state for '$destination'"
@@ -577,6 +645,12 @@ atomic_write() {
   if ! mv "$temporary" "$destination"; then
     rm -f "$temporary"
     die 7 "cannot atomically write '$destination'"
+  fi
+}
+
+worktree_fingerprint() {
+  if [ -n "$GIT_ROOT" ]; then
+    "$PYTHON_BIN" "$SNAPSHOT" fingerprint --root "$ROOT" --state-rel "$STATE_REL"
   fi
 }
 
@@ -610,16 +684,21 @@ run_claude() {
     esac
   fi
 
-  # A fresh attempt, including reply/failure, revokes previous delivery permission.
-  rm -f "$STATE_DIR/$thread.approved" || die 7 "cannot invalidate previous approval"
-  atomic_write "$mode_file" "$mode"
+  # An advisory preflight failure remains visible in status. A required claim
+  # already has its own status. Leave its evidence intact until a launch.
+  if ! has_review_state "$thread"; then
+    atomic_write "$mode_file" "$mode"
+    atomic_write "$STATE_DIR/$thread.worktree" "$ROOT"
+  elif ! $REQUIRED_RUNTIME; then
+    die 7 "resume this required review in its Git repository"
+  fi
 
-  snapshot_start="$("$PYTHON_BIN" "$SNAPSHOT" fingerprint --root "$ROOT" --state-rel "$STATE_REL")" \
+  snapshot_start="$(worktree_fingerprint)" \
     || die 7 "failed to fingerprint repository"
 
   check_runtime
 
-  after_preflight="$("$PYTHON_BIN" "$SNAPSHOT" fingerprint --root "$ROOT" --state-rel "$STATE_REL")" \
+  after_preflight="$(worktree_fingerprint)" \
     || die 7 "failed to fingerprint repository after Claude preflight"
   if [ "$snapshot_start" != "$after_preflight" ]; then
     die 8 "repository changed during Claude preflight; retry from a stable worktree"
@@ -672,7 +751,7 @@ run_claude() {
       --base-ref "$target_ref")" || die 7 "failed to build review context"
   fi
 
-  before="$("$PYTHON_BIN" "$SNAPSHOT" fingerprint --root "$ROOT" --state-rel "$STATE_REL")" \
+  before="$(worktree_fingerprint)" \
     || die 7 "failed to fingerprint repository"
   if [ "$snapshot_start" != "$before" ]; then
     die 8 "repository changed while the review context was being built; retry from a stable worktree"
@@ -695,9 +774,18 @@ Mode: PLAN. Stress-test scope, architecture boundaries, sequencing, failure mode
       role_prompt="$role_prompt
 Mode: REVIEW. For final approval, review the complete current candidate and affected consumers.
 For a bounded follow-up, check the finding and affected invariants; do not repeat unrelated checks without cause.
+Comparison: $comparison"
+      if $ONESHOT; then
+        # The disposable snapshot lives outside the project. Include it directly
+        # so Read needs no permission to open an external temporary path.
+        role_prompt="$role_prompt
+Review this complete branch snapshot and its consumers:
+$(cat "$context_file")"
+      else
+        role_prompt="$role_prompt
 The current branch snapshot is at: $context_file
-Comparison: $comparison
 Read that context file before forming findings, then inspect changed consumers in the repository as needed."
+      fi
       ;;
     ask)
       role_prompt="$role_prompt
@@ -729,12 +817,17 @@ $prompt"
     --max-budget-usd "$BUDGET" \
     --output-format json
   [ -z "$EFFORT" ] || set -- "$@" --effort "$EFFORT"
-  if [ -n "$existing_id" ]; then
+  if $ONESHOT; then
+    set -- "$@" --no-session-persistence
+  elif [ -n "$existing_id" ]; then
     set -- "$@" --resume "$existing_id"
   else
     set -- "$@" --name "codex-cc-triage:$thread"
   fi
 
+  if $REQUIRED_RUNTIME; then
+    CODEX_CC_TRIAGE_WORKER_PID="$$" bash "$SCRIPT_DIR/review-state.sh" charge "$thread" "$mode" "$target_ref" "$before" <<< "$prompt" || return $?
+  fi
   printf '%s' "$full_prompt" | "$PYTHON_BIN" "$TIMEOUT_RUNNER" \
     --timeout "$TIMEOUT_SECONDS" \
     --stdout "$RAW_JSON" \
@@ -743,10 +836,11 @@ $prompt"
     -- "$CLAUDE_BIN" "$@"
   claude_rc=$?
 
-  after="$("$PYTHON_BIN" "$SNAPSHOT" fingerprint --root "$ROOT" --state-rel "$STATE_REL")" \
+  after="$(worktree_fingerprint)" \
     || die 7 "failed to fingerprint repository after Claude"
   if [ "$before" != "$after" ]; then
     persist_failure "$thread" "$mode"
+    $ONESHOT && die 5 "Claude changed repository state during the ephemeral review"
     die 5 "Claude changed repository state; inspect the worktree and $STATE_DIR/$thread.last-error.*"
   fi
 
@@ -754,10 +848,12 @@ $prompt"
     persist_failure "$thread" "$mode"
     if [ "$claude_rc" -eq 124 ] \
       && [ "$(cat "$TIMEOUT_STATUS" 2>/dev/null)" = "timeout" ]; then
+      $ONESHOT && die 3 "ephemeral Claude call timed out after $TIMEOUT_SECONDS seconds"
       die 3 "Claude timed out after $TIMEOUT_SECONDS seconds; inspect $STATE_DIR/$thread.last-error.*"
     fi
     if [ "$claude_rc" -eq 125 ] \
       && [ "$(cat "$TIMEOUT_STATUS" 2>/dev/null)" = "termination-failed" ]; then
+      $ONESHOT && die 3 "ephemeral Claude timeout cleanup could not confirm process-group termination"
       die 3 "Claude timeout cleanup could not confirm process-group termination; inspect $STATE_DIR/$thread.last-error.*"
     fi
   fi
@@ -769,6 +865,7 @@ $prompt"
     --meta-output "$PARSED_META"
   parse_rc=$?
   if [ "$parse_rc" -eq 3 ]; then
+    $ONESHOT && die 3 "ephemeral Claude call reached budget limit (\$$BUDGET), review incomplete"
     persist_failure "$thread" "$mode"
     rm -f "$STATE_DIR/$thread.last-result" "$STATE_DIR/$thread.last-fingerprint" \
       "$STATE_DIR/$thread.last-base" || die 7 "cannot clear incomplete review artifacts"
@@ -785,10 +882,12 @@ $prompt"
     die 3 "Claude reached budget limit (\$$BUDGET); session '$returned_id' and pinned base retained, review incomplete. Continue this thread only within an authorized budget; inspect $STATE_DIR/$thread.last-error.*"
   fi
   if [ "$claude_rc" -ne 0 ]; then
+    $ONESHOT && die 3 "ephemeral Claude call exited $claude_rc"
     die 3 "Claude exited $claude_rc; inspect $STATE_DIR/$thread.last-error.*"
   fi
   if [ "$parse_rc" -ne 0 ]; then
     persist_failure "$thread" "$mode"
+    $ONESHOT && die 4 "could not parse ephemeral Claude output"
     die 4 "could not parse Claude output; inspect $STATE_DIR/$thread.last-error.*"
   fi
 
@@ -798,6 +897,10 @@ $prompt"
     die 4 "resumed Claude session changed id from '$existing_id' to '$returned_id'"
   fi
 
+  if $ONESHOT; then
+    cat "$PARSED_RESULT"
+    return
+  fi
   result="$(cat "$PARSED_RESULT")"
   metadata="$(cat "$PARSED_META")"
   if [ "$mode" = "review" ]; then
@@ -830,6 +933,7 @@ $prompt"
 
 action="${1:-}"
 if [ "$action" = "name" ]; then
+  [ "$#" -ge 2 ] && [ "$#" -le 3 ] || die 2 "usage: claude-thread.sh name MODE [SOURCE]"
   thread_name "${2:-}" "${3:-}"
   exit $?
 fi
@@ -837,49 +941,66 @@ fi
 # Check the existing dependency before migration, lease acquisition or approval invalidation.
 case "$action" in dispatch|reply) check_python_runtime ;; esac
 
-if [ "$action" = status ]; then
-  prepare_state_dir true
-else
-  prepare_state_dir false
-fi
-
 case "$action" in
+  dispatch)
+    mode="${2:-}"; thread="${3:-}"; target_ref="${4:-}"
+    case "$mode" in ask|plan|review) ;; *) die 2 "usage: claude-thread.sh dispatch ask|plan|review THREAD [BASE] [--oneshot]" ;; esac
+    validate_thread "$thread"
+    if [ "$target_ref" = --oneshot ] && [ "$#" -eq 4 ]; then
+      target_ref=""; ONESHOT=true
+    elif [ "${5:-}" = --oneshot ] && [ "$#" -eq 5 ]; then
+      ONESHOT=true
+    elif [ "$#" -gt 4 ]; then die 2 "unexpected dispatch arguments"; fi
+    case "$target_ref" in -*) die 2 "target ref must not start with '-'";; esac
+    if [ "$mode" = review ] && [ -z "$GIT_ROOT" ]; then die 7 "branch review needs a Git repository"; fi
+    if $ONESHOT; then
+      REQUIRED_RUNTIME=false
+      EPHEMERAL_DIR="$(mktemp -d "${TMPDIR:-/tmp}/codex-cc-oneshot.XXXXXXXX")" || die 7 "cannot create temporary review directory"
+      STATE_DIR="$EPHEMERAL_DIR"; CONTEXT_DIR="$EPHEMERAL_DIR"
+    else
+      prepare_state_dir false
+    fi
+    prompt="$(cat)"
+    [ -n "$prompt" ] || die 2 "prompt is required on stdin"
+    if $ONESHOT && [ "${prompt%%$'\n'*}" = REQUIRED_REVIEW ]; then
+      die 2 "required review needs a persistent foreground claim"
+    fi
+    acquire_lock "$thread"
+    run_claude "$mode" "$thread" "$prompt" "$target_ref"
+    ;;
+  resolve)
+    prepare_state_dir true
+    [ "$#" -le 2 ] || die 2 "usage: claude-thread.sh resolve [thread]"
+    resolve_thread "${2:-}"
+    ;;
   status)
+    [ "$#" -le 2 ] || die 2 "usage: claude-thread.sh status [thread]"
+    prepare_state_dir true
     thread="${2:-}"
     [ -z "$thread" ] || validate_thread "$thread"
     status_threads "$thread"
     ;;
   new)
+    [ "$#" -eq 2 ] || die 2 "usage: claude-thread.sh new THREAD"
     thread="${2:-}"
+    validate_thread "$thread"
+    prepare_state_dir false
     reset_thread "$thread"
     ;;
-  dispatch)
-    mode="${2:-}"
-    case "$mode" in
-      ask|plan|review) ;;
-      *) die 2 "usage: claude-thread.sh dispatch ask|plan|review thread [target-ref]" ;;
-    esac
-    thread="${3:-}"
-    target_ref="${4:-}"
-    validate_thread "$thread"
-    prompt="$(cat)"
-    [ -n "$prompt" ] || die 2 "prompt is required on stdin"
-    acquire_lock "$thread"
-    run_claude "$mode" "$thread" "$prompt" "$target_ref"
-    ;;
   reply)
-    thread="${2:-}"
-    validate_thread "$thread"
+    [ "$#" -eq 2 ] || die 2 "usage: claude-thread.sh reply THREAD"
+    thread="${2:-}"; validate_thread "$thread"
+    prompt="$(cat)"; [ -n "$prompt" ] || die 2 "prompt is required on stdin"
+    prepare_state_dir false
+    acquire_lock "$thread"
     assert_thread_files_safe "$thread"
-    [ -f "$STATE_DIR/$thread.id" ] || die 6 "thread does not exist: $thread"
+    [ -s "$STATE_DIR/$thread.id" ] || die 6 "thread does not exist: $thread"
     mode="$(cat "$STATE_DIR/$thread.mode" 2>/dev/null || true)"
     case "$mode" in
-      ask|plan|review) ;;
+      ask|plan) ;;
+      review) [ -n "$GIT_ROOT" ] || die 7 "branch review needs a Git repository" ;;
       *) die 6 "thread mode is missing or invalid: $thread" ;;
     esac
-    prompt="$(cat)"
-    [ -n "$prompt" ] || die 2 "prompt is required on stdin"
-    acquire_lock "$thread"
     run_claude "$mode" "$thread" "$prompt" ""
     ;;
   *)

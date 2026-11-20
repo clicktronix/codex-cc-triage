@@ -1,6 +1,6 @@
 {
   "name": "codex-cc-triage",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "description": "Ask Claude Code for persistent, read-only technical, planning, and code-review second opinions from Codex.",
   "author": {
     "name": "Clicktronix",
@@ -20,7 +20,7 @@
   "interface": {
     "displayName": "Codex CC Triage",
     "shortDescription": "Read-only Claude opinions",
-    "longDescription": "Use task-scoped Claude Code sessions from Codex to ask bounded technical questions, stress-test plans, review branch diffs, and re-evaluate fixes without granting the child agent write access.",
+    "longDescription": "Ask Claude bounded questions, assess sources, debate designs, review diffs and revisit findings on the same thread. Required review ties the result to a clean Git candidate and its authorized call budget.",
     "developerName": "Clicktronix",
     "category": "Developer Tools",
     "capabilities": [

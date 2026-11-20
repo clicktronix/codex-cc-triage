@@ -4,4 +4,4 @@ interface:
   default_prompt: "Use $codex-cc-triage:claude-review to review my current branch."
 
 policy:
-  allow_implicit_invocation: false
+  allow_implicit_invocation: true

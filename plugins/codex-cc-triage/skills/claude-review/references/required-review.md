@@ -1,89 +1,46 @@
-## Required delivery contract
+# Required review
 
-An owning workflow may invoke this skill with the exact request:
+Use `--required --base <ref> --spec <repo-relative-path> --thread <name> [--cap N]` for a clean Git candidate. Use foreground, persistent mode. A new contract defaults to seven calls. Pass an explicit cap of 1–7 when the owner specifies one. Omit it on resume to preserve a pinned cap. Per-process USD and effort follow the [owner's budget](../../references/ownership.md).
 
-```text
-$codex-cc-triage:claude-review --required --base <ref> --spec <repo-relative-path> --thread <thread> --cap <1..5> <intent>
+## Claim and dispatch
+
+Resolve the base to a literal commit, and keep it for the lifetime of the thread. Use a tracked spec. Quote paths throughout, including spaces and Unicode. From the candidate checkout:
+
+```bash
+gate="$plugin_root/scripts/review-state.sh"
+driver="$plugin_root/scripts/claude-thread.sh"
+begin=$(bash "$gate" begin "$thread" --base "$base" --spec "$spec" ${cap:+--cap "$cap"}) || exit $?
+claim=${begin##* claim=}
+claim=${claim%% *}
+header=$(bash "$gate" header "$thread") || exit $?
+printf '%s\n%s\n' "$header" "$review_request" | bash "$driver" dispatch review "$thread" "$base"
 ```
 
-Treat these tokens as a machine contract, not prose. Require every flag, reject duplicate/unknown
-flags, and reject a dirty candidate. Required mode is foreground and read-only; a timeout, tool
-failure, missing verdict, cap, divergence, candidate movement, or `REQUEST_CHANGES` never approves.
+The header supplies the four scope lines exactly once. Include the complete review scope, acceptance evidence and instruction to end with `APPROVE` or `REQUEST_CHANGES`. A blocker needs a file and line. For an integration merge directly on an approved first parent, add `--integration` to `begin`. It spends one authorized call and preserves the attempt count.
 
-1. Resolve `<plugin-root>`, then capture the candidate before dispatch. Preserve the exact `claim`
-   token printed by `begin`; it reserves this attempt and cannot be reused for another:
+## Record the result before editing
 
-   ```bash
-   bash "<plugin-root>/scripts/review-state.sh" begin <thread> \
-     --base <ref> --spec <repo-relative-path> --cap <1..5>
-   ```
+After the foreground result, including blocking findings, immediately run:
 
-2. Read the canonical `head`, `base_sha`, and `spec_path` from the reported/state candidate. The
-   first four prompt lines must be exactly the following, in this order and exactly once:
+```bash
+bash "$gate" record "$thread" foreground "$claim"
+```
 
-   ```text
-   REQUIRED_REVIEW
-   BASE_SHA: <canonical base SHA>
-   CANDIDATE_SHA: <candidate HEAD>
-   SPEC_PATH: <repo-relative spec path>
-   ```
+If the worker is still running, follow the same process. For a provider budget-exhausted result record the incomplete round. For a dispatch failure without a completed result, call `abort "$thread" dispatch-failure "$claim"` on the gate (other reasons are `timeout` and `tool-failure`). If it reports `ROUND_COMPLETED`, record the result. A rejected preflight costs zero; a launched call is spent, even if it fails.
 
-   Ask Claude for complete correctness, architecture/systemic, security/data, and
-   testing/operability review against the spec. Require its final decision on a standalone line:
-   `APPROVE` or `REQUEST_CHANGES`. Do not seed suspected findings or cap their count.
+Use `bash "$gate" check "$thread"` on the approved candidate. Its final line is the evidence for the owner:
 
-3. Dispatch `review` to the explicit thread and canonical base using the ordinary driver command
-   below. A second dispatch cannot share the same claim. After one successful foreground dispatch,
-   immediately record and self-verify:
+```text
+CODEX_CC_REQUIRED_REVIEW APPROVE thread=<thread> head=<sha> tree=<sha> fingerprint=<sha256> base_sha=<sha> spec_path=<path>
+```
 
-   ```bash
-   bash "<plugin-root>/scripts/claude-thread.sh" \
-     dispatch review <thread> <canonical-base-sha> <<'CODEX_CC_REQUIRED_PROMPT'
-   REQUIRED_REVIEW
-   BASE_SHA: <canonical-base-sha>
-   CANDIDATE_SHA: <candidate-head-sha>
-   SPEC_PATH: <canonical-spec-path>
-   <unbiased review request and exact verdict instruction>
-   CODEX_CC_REQUIRED_PROMPT
+The final `spec_path=` value occupies the rest of the line. Preserve it intact. The owning workflow decides where it may publish.
 
-   bash "<plugin-root>/scripts/review-state.sh" record <thread> foreground <claim-token>
-   ```
+## Continue on the same thread
 
-   Only exit 0 is approval. Its final stdout line must be returned verbatim:
+- For `REQUEST_CHANGES`, validate the findings, make authorized repairs, verify affected criteria and begin a fresh round. If all findings are refuted or waived by the owner, a fresh review can cover the same SHA.
+- `NO_FINDINGS` means the response requested changes without locating a blocker. The launched call consumes budget. Retry within the remaining grant. A technical integration retry covers the same merge. Blocking findings require a normal round.
+- At `CAP_REACHED`, report missing approval once and continue safe repairs. With a new grant, call `bash "$gate" renew "$thread" --by "$owner" --rounds "$calls" --grant "$decision_id"`. Reuse that ID on replay. Omitting `--rounds` grants one call. A prior approval on a changed HEAD can be renewed directly once its grant is exhausted.
+- For unresolved divergence, mark a pending claim with `stop "$thread" divergence "$claim"`. Follow [thread recovery](../../claude-thread/SKILL.md#recovery) for a damaged contract or a resolved divergence. Restore confirmed state or the remaining authorized grant. A thread reset grants no calls.
 
-   ```text
-   CODEX_CC_REQUIRED_REVIEW APPROVE thread=<thread> head=<sha> tree=<sha> fingerprint=<sha256> base_sha=<sha> spec_path=<path>
-   ```
-
-4. For `budget_exhausted`, record the incomplete round with its claim token; it cannot
-   approve, and the attempt remains spent. Continue the retained session only within an
-   authorized budget and the remaining attempt cap. Do not abort to refund this attempt.
-   For other dispatch failures before producing a completed round, release only that claim with
-   `review-state.sh abort <thread> <dispatch-failure|timeout|tool-failure> <claim-token>`. `abort`
-   refuses a claim after any dispatch result was recorded and returns the unspent cap slot. A crash
-   while publishing the returned slot remains fail-closed as `PENDING`.
-   If `abort` reports `ROUND_COMPLETED`, record the completed round instead. For damaged
-   claims or leases, follow [thread recovery](../../claude-thread/SKILL.md#recovery).
-5. On `REQUEST_CHANGES`, validate every finding. Commit accepted fixes as a new clean candidate, or
-   keep the same immutable candidate when all findings are explicitly refuted or explicitly waived by the user. Either
-   path requires a fresh `begin`, one fresh review dispatch, and its new claim; review history alone
-   is not approval. `--cap` counts `begin` claims including the first dispatch, not findings or five
-   repair cycles.
-6. `CAP_REACHED` and `DIVERGED` are terminal and never approve. If an owning workflow detects cap or
-   divergence while a claim is still `PENDING`, call
-   `review-state.sh stop <thread> <cap|divergence> <claim-token>`. Otherwise preserve the recorded
-   terminal state. Continue safe repairs and return the missing approval to the owner in one request.
-   Use [thread recovery](../../claude-thread/SKILL.md#recovery) for a new lifecycle after
-   resolving divergence. Exhausting the review budget requires renewed user authorization;
-   reuse an existing decision rather than asking again.
-
-Never synthesize the marker from Claude prose. Only `review-state.sh record/check` may emit it.
-
-The driver refuses a required comparison against another base before the paid call; record
-also checks actual base metadata. After Python validation, a later reply or failed dispatch
-revokes previous approval; a missing runtime leaves state intact. On a dead lease,
-abort the unfinished claim and reuse this thread: recovery
-preserves its session id and log. Do not reset merely to clear a stale process marker.
-
-A clean candidate and endpoint fingerprints do not prove an immutable filesystem for
-the entire call. Keep the candidate stable; the owner owns concurrent worktree activity.
+The candidate must remain stable during review. A clean fingerprint at each endpoint cannot establish what happened between them.

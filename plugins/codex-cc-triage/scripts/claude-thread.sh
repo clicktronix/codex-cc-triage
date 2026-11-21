@@ -826,8 +826,9 @@ $prompt"
     set -- "$@" --name "codex-cc-triage:$thread"
   fi
 
-  if $REQUIRED_RUNTIME; then
-    CODEX_CC_TRIAGE_WORKER_PID="$$" bash "$SCRIPT_DIR/review-state.sh" charge "$thread" "$mode" "$target_ref" "$before" <<< "$prompt" || return $?
+  # A required thread accepts only its pending claim's exact review prompt.
+  if $REQUIRED_RUNTIME && has_review_state "$thread"; then
+    bash "$SCRIPT_DIR/review-state.sh" preflight "$thread" "$mode" "$target_ref" "$before" <<< "$prompt" || return $?
   fi
   printf '%s' "$full_prompt" | "$PYTHON_BIN" "$TIMEOUT_RUNNER" \
     --timeout "$TIMEOUT_SECONDS" \

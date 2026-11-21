@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # Machine-readable required Claude review bound to one clean candidate.
 #
-# begin <thread> --base <ref> --spec <path> [--cap 1..7] [--integration]
-# advisory-check <thread>
+# begin <thread> --base <ref> --spec <path> [--cap 1..7]
+# mode|header|advisory-check <thread>
+# preflight <thread> <mode> <base-sha> <fingerprint>   (prompt on stdin)
 # record <thread> <foreground|background> [claim-token]
 # abort <thread> <dispatch-failure|timeout|tool-failure> <claim-token>
 # stop <thread> <cap|divergence> [claim-token]
 # check <thread>
+# renew <thread> --by <who>
 # reset <thread>
 set -u
 umask 077
@@ -20,7 +22,7 @@ PYTHON_BIN="${CODEX_CC_TRIAGE_PYTHON_BIN:-python3}"
 
 die() { code="$1"; shift; echo "codex-cc-triage: $*" >&2; exit "$code"; }
 usage() {
-  die 2 "usage: review-state.sh begin <thread> --base <ref> --spec <path> [--cap 1..7] [--integration] | mode|header|advisory-check <thread> | renew <thread> --by <owner> [--rounds N] [--grant ID] | record <thread> <foreground|background> [claim-token] | abort <thread> <dispatch-failure|timeout|tool-failure> <claim-token> | stop <thread> <cap|divergence> [claim-token] | check <thread> | reset <thread>"
+  die 2 "usage: review-state.sh begin <thread> --base <ref> --spec <path> [--cap 1..7] | mode|header|advisory-check <thread> | preflight <thread> <mode> <base-sha> <fingerprint> (prompt on stdin) | record <thread> <foreground|background> [claim-token] | abort <thread> <dispatch-failure|timeout|tool-failure> <claim-token> | stop <thread> <cap|divergence> [claim-token] | check <thread> | renew <thread> --by <who> | reset <thread>"
 }
 
 VERB="${1:-}"; THREAD="${2:-}"
@@ -45,7 +47,7 @@ fi
 cd "$ROOT" || die 7 "cannot enter repository root"
 ROOT="$(pwd -P)" || die 7 "cannot canonicalize repository root"
 case "$VERB" in
-  mode|header|advisory-check) STATE_DIR="$(bash "$STATE_HELPER" --read-only)" || exit $? ;;
+  mode|header|advisory-check|preflight) STATE_DIR="$(bash "$STATE_HELPER" --read-only)" || exit $? ;;
   *) STATE_DIR="$(bash "$STATE_HELPER")" || exit $? ;;
 esac
 STATE_REL=".agent-state/codex-cc-triage"
@@ -235,7 +237,6 @@ result_verdict() {
   "$PYTHON_BIN" - "$STATE_DIR/$THREAD.last-result" <<'PY'
 import re
 import sys
-import unicodedata
 from pathlib import Path
 
 path = Path(sys.argv[1])
@@ -267,17 +268,10 @@ for raw in lines:
         verdicts.append(raw)
 if fence is not None or len(verdicts) != 1 or last_outside_fence != verdicts[0]:
     raise SystemExit(10)
-if verdicts[0] == "REQUEST_CHANGES":
-    text = "\n".join(lines)
-    text = "".join("_" if unicodedata.category(c).startswith("M") else c for c in text)
-    paths = re.findall(r"([`][^`\n]+[`]|[\w./-]+):[1-9][0-9]*", text)
-    if not any(any(c.isalpha() or c == "_" for c in path) or "/" in path.strip("`/") for path in paths):
-        print("NO_FINDINGS")
-        raise SystemExit(0)
 print(verdicts[0])
 PY
 }
-prompt_scope_exact() {
+prompt_scope_exact() { # file or - for stdin; 0 exact, 1 mismatch, 2 unreadable
   file="$1"; base="$2"; head="$3"; spec="$4"
   "$PYTHON_BIN" - "$file" "$base" "$head" "$spec" 3<&0 <<'PY'
 import os
@@ -309,80 +303,23 @@ write_state() { # status verdict eligible mode head tree fp round reason
     "$claim" "$expires" "$8" "$9" "$(timestamp)" \
     | atomic_write "$REVIEW_STATE" || die 7 "cannot write review state"
 }
-write_loop_state() {
-  printf 'version=2\nbase_sha=%s\nspec_path=%s\ncap=%s\nstart_round=%s\nattempts=%s\nallowance=%s\nlaunches=%s\nlast_launch=%s\ngrants=%s\nrenewed_from=%s\nrenewed_by=%s\nintegration_anchor=%s\nintegration_retry_head=%s\ntimestamp=%s\n' \
-    "$1" "$2" "$3" "$4" "$5" "$ALLOWANCE" "$LAUNCHES" "$LAST_LAUNCH" "$GRANTS" "$R_FROM" "$R_BY" "$ANCHOR" "$RETRY_HEAD" "$(timestamp)" \
-    | atomic_write "$LOOP_STATE" || die 7 "cannot write review loop"
+write_loop_state() { # base spec cap start attempts [renewed_by]; renewed_by is carried over
+  renewed_by="${6-$(field "$LOOP_STATE" renewed_by)}"
+  {
+    printf 'version=1\nbase_sha=%s\nspec_path=%s\ncap=%s\nstart_round=%s\nattempts=%s\n' "$1" "$2" "$3" "$4" "$5"
+    [ -z "$renewed_by" ] || printf 'renewed_by=%s\n' "$renewed_by"
+    printf 'timestamp=%s\n' "$(timestamp)"
+  } | atomic_write "$LOOP_STATE" || die 7 "cannot write review loop"
 }
-invalid_budget() { die 10 "INVALID_CLAIM_STATE: restore matching review state or reconcile the remaining authorized calls"; }
+invalid_claim() { die 10 "INVALID_CLAIM_STATE: inspect saved state; follow claude-thread Recovery before resetting"; }
 is_required() { [ -f "$LOOP_STATE" ] || [ -f "$PREPARED" ] || [ -f "$CANDIDATE" ] || [ -f "$REVIEW_STATE" ] || [ -f "$APPROVED" ]; }
-load_budget() {
-  local status completed token
-  ALLOWANCE=${CAP:-7}; LAUNCHES=0; LAST_LAUNCH=""; GRANTS=""; R_FROM=""; R_BY=""
-  ANCHOR=""; RETRY_HEAD=""
-  if [ ! -f "$LOOP_STATE" ]; then
-    [ ! -f "$CANDIDATE" ] && [ ! -f "$REVIEW_STATE" ] && [ ! -f "$APPROVED" ] || invalid_budget
-    return
-  fi
-  LOOP_BASE="$(field "$LOOP_STATE" base_sha)"; LOOP_SPEC="$(field "$LOOP_STATE" spec_path)"
-  LOOP_CAP="$(field "$LOOP_STATE" cap)"; LOOP_START="$(field "$LOOP_STATE" start_round)"
-  ATTEMPTS="$(field "$LOOP_STATE" attempts)"
-  [ -n "$LOOP_BASE" ] && [ -n "$LOOP_SPEC" ] || invalid_budget
-  case "$LOOP_CAP" in [1-7]) ;; *) invalid_budget ;; esac
-  valid_decimal "$ATTEMPTS" 7 && valid_decimal "$LOOP_START" 7 || invalid_budget
-  case "$(field "$LOOP_STATE" version)" in
-    2)
-      ALLOWANCE="$(field "$LOOP_STATE" allowance)"; LAUNCHES="$(field "$LOOP_STATE" launches)"
-      LAST_LAUNCH="$(field "$LOOP_STATE" last_launch)"; GRANTS="$(field "$LOOP_STATE" grants)"
-      R_FROM="$(field "$LOOP_STATE" renewed_from)"; R_BY="$(field "$LOOP_STATE" renewed_by)"
-      ANCHOR="$(field "$LOOP_STATE" integration_anchor)"; RETRY_HEAD="$(field "$LOOP_STATE" integration_retry_head)"
-      valid_decimal "$ALLOWANCE" 7 && [ "$ALLOWANCE" -gt 0 ] && valid_decimal "$LAUNCHES" 7 || invalid_budget
-      ;;
-    1)
-      ALLOWANCE="$LOOP_CAP"
-      status="$(field "$REVIEW_STATE" status)"
-      completed=$(( $(review_round) - LOOP_START ))
-      [ "$completed" -ge 0 ] || invalid_budget
-      LAUNCHES="$ATTEMPTS"
-      token="$(field "$CANDIDATE" claim_token)"
-      if [ "$status" = PENDING ] && [ "$ATTEMPTS" -gt 0 ]; then
-        # The v1 driver rewrote .mode before entering Claude. A mode older
-        # than the pending candidate belongs to a previous dispatch.
-        if [ "$(field "$CANDIDATE" round_before)" = "$(review_round)" ] \
-          && { [ ! -f "$STATE_DIR/$THREAD.mode" ] || [ "$CANDIDATE" -nt "$STATE_DIR/$THREAD.mode" ]; } \
-          && [ ! -f "$STATE_DIR/$THREAD.last-prompt" ] && [ ! -f "$STATE_DIR/$THREAD.failed" ] \
-          && [ ! -e "$STATE_DIR/$THREAD.last-error.stderr" ] && [ ! -e "$STATE_DIR/$THREAD.last-error.json" ]; then
-          LAUNCHES=$((ATTEMPTS - 1))
-        else
-          # V1 had no start receipt. Reconcile a possible launch before resuming.
-          LAST_LAUNCH="$token"
-        fi
-      elif [ "$status" = ABORTED ] && [ -f "$STATE_DIR/$THREAD.failed" ]; then
-        # V1 could refund multiple failed launches, retaining only the last
-        # diagnostic. There is no reliable remaining balance to carry forward.
-        LAUNCHES="$ALLOWANCE"
-      fi
-      [ "$completed" -le "$LAUNCHES" ] || LAUNCHES="$completed"
-      ;;
-    *) invalid_budget ;;
-  esac
-  if [ -n "$R_FROM" ] && [ "$R_FROM" = "$(field "$CANDIDATE" claim_token)" ] && [ "$(field "$REVIEW_STATE" status)" != RENEWED ]; then
-    # The grant was durable before its RENEWED status. Complete that publication
-    # before a second caller can replace it or misread the previous outcome.
-    write_state RENEWED NONE false foreground "$(head_sha)" "$(tree_sha)" "" "$(review_round)" budget_renewed
-  fi
-  if [ "$(field "$REVIEW_STATE" status)" = PENDING ] && [ ! -f "$PREPARED" ]; then
-    [ "$(field "$CANDIDATE" base_sha)" = "$LOOP_BASE" ] && [ "$(field "$CANDIDATE" spec_path)" = "$LOOP_SPEC" ] \
-      && [ "$(field "$CANDIDATE" cap)" = "$LOOP_CAP" ] && [ "$(field "$CANDIDATE" loop_start_round)" = "$LOOP_START" ] || invalid_budget
-  fi
-}
-publish_claim() {
+publish_claim() { # The journal is complete; publishing it again yields the same claim.
   local attempt token
   attempt="$(field "$PREPARED" attempt)"; token="$(field "$PREPARED" claim_token)"
-  valid_decimal "$attempt" 7 && [ "$attempt" -le "$ALLOWANCE" ] \
-    && [ "$(field "$PREPARED" round_before)" = "$CURRENT_ROUND" ] || invalid_budget
-  case "$token" in ''|*[!0-9a-f]*) invalid_budget ;; esac
-  case "${#token}" in 40|64) ;; *) invalid_budget ;; esac
+  valid_decimal "$attempt" 7 && [ "$attempt" -le "$CAP" ] \
+    && [ "$(field "$PREPARED" round_before)" = "$CURRENT_ROUND" ] || invalid_claim
+  case "$token" in ''|*[!0-9a-f]*) invalid_claim ;; esac
+  case "${#token}" in 40|64) ;; *) invalid_claim ;; esac
   write_loop_state "$BASE_SHA" "$SPEC_PATH" "$CAP" "$(field "$PREPARED" loop_start_round)" "$attempt"
   rm -f "$STATE_DIR/$THREAD.last-prompt" "$STATE_DIR/$THREAD.last-result" "$STATE_DIR/$THREAD.last-fingerprint" "$APPROVED" \
     || die 7 "cannot clear previous result"
@@ -390,20 +327,12 @@ publish_claim() {
   printf '%s\n' "$ROOT" | atomic_write "$STATE_DIR/$THREAD.worktree" || die 7 "cannot publish worktree"
   write_state PENDING NONE false foreground "$HEAD_SHA" "$TREE_SHA" "$FP" "$CURRENT_ROUND" awaiting_verdict
   rm "$PREPARED" || die 7 "cannot finish claim publication"
-  echo "PENDING head=$HEAD_SHA tree=$TREE_SHA fingerprint=$FP claim=$token attempt=$attempt/$ALLOWANCE"
-}
-unpublished_first_claim() {
-  local suffix
-  [ "$(field "$LOOP_STATE" version)" = 1 ] && [ "$ATTEMPTS" = 1 ] && [ "$CURRENT_ROUND" = "$LOOP_START" ] || return 1
-  for suffix in review-state approved mode id log failed last-prompt last-result last-fingerprint last-base last-error.json last-error.stderr; do
-    [ ! -e "$STATE_DIR/$THREAD.$suffix" ] || return 1
-  done
-  [ ! -f "$CANDIDATE" ] || { [ "$(field "$CANDIDATE" head)" = "$HEAD_SHA" ] && [ "$(field "$CANDIDATE" base_sha)" = "$BASE_SHA" ] && [ "$(field "$CANDIDATE" spec_path)" = "$SPEC_PATH" ]; }
+  echo "PENDING head=$HEAD_SHA tree=$TREE_SHA fingerprint=$FP claim=$token attempt=$attempt/$CAP"
 }
 assert_claim() {
   provided="$1"; expected="$(field "$CANDIDATE" claim_token)"
-  case "$expected" in ''|*[!0-9a-f]*) die 10 "INVALID_CLAIM_STATE: inspect saved state; follow claude-thread Recovery before resetting" ;; esac
-  case "${#expected}" in 40|64) ;; *) die 10 "INVALID_CLAIM_STATE: inspect saved state; follow claude-thread Recovery before resetting" ;; esac
+  case "$expected" in ''|*[!0-9a-f]*) invalid_claim ;; esac
+  case "${#expected}" in 40|64) ;; *) invalid_claim ;; esac
   [ "$provided" = "$expected" ] \
     || die 10 "CLAIM_MISMATCH: required-review round belongs to another invocation"
 }
@@ -414,11 +343,13 @@ if [ "$VERB" = mode ]; then
   if is_required; then echo required; else echo advisory; fi
   exit 0
 fi
-if [ "$VERB" = advisory-check ] && [ ! -d "$STATE_DIR" ]; then
-  [ "$#" -eq 2 ] || usage
-  echo "ADVISORY_READY thread=$THREAD"; exit 0
+if [ ! -d "$STATE_DIR" ]; then
+  case "$VERB" in
+    advisory-check) [ "$#" -eq 2 ] || usage; echo "ADVISORY_READY thread=$THREAD"; exit 0 ;;
+    header) die 10 "NO_PENDING_REVIEW" ;;
+    preflight) [ "$#" -eq 5 ] || usage; exit 0 ;;
+  esac
 fi
-if [ "$VERB" = header ] && [ ! -d "$STATE_DIR" ]; then die 10 "NO_PENDING_REVIEW"; fi
 acquire_review_lock
 if [ -f "$PREPARED" ]; then
   case "$VERB" in begin|reset) ;; *) die 10 "CLAIM_INCOMPLETE: repeat begin for the same candidate" ;; esac
@@ -433,18 +364,18 @@ case "$VERB" in
     echo "ADVISORY_READY thread=$THREAD"
     ;;
 
-  header|charge)
-    if [ "$VERB" = charge ]; then
+  header|preflight)
+    if [ "$VERB" = header ]; then
+      [ "$#" -eq 2 ] || usage
+    else
       [ "$#" -eq 5 ] || usage
-      [ -n "${CODEX_CC_TRIAGE_WORKER_PID:-}" ] && [ "$(cat "$ACTIVE_LEASE/pid" 2>/dev/null)" = "$CODEX_CC_TRIAGE_WORKER_PID" ] || die 10 "dispatch must own its lease"
       is_required || exit 0
       [ "$3" = review ] || die 10 "REQUIRED_THREAD_RESERVED: use a review claim on this thread"
-    else
-      [ "$#" -eq 2 ] || usage
     fi
-    [ "$(field "$REVIEW_STATE" status)" = PENDING ] && [ -f "$CANDIDATE" ] || die 10 "REQUIRED_THREAD_RESERVED: begin a required round first"
+    [ "$(field "$REVIEW_STATE" status)" = PENDING ] && [ -f "$CANDIDATE" ] \
+      || die 10 "REQUIRED_THREAD_RESERVED: begin a required round first"
     base="$(field "$CANDIDATE" base_sha)"; head="$(field "$CANDIDATE" head)"; spec="$(field "$CANDIDATE" spec_path)"
-    [ -n "$base" ] && [ -n "$head" ] && [ -n "$spec" ] || invalid_budget
+    [ -n "$base" ] && [ -n "$head" ] && [ -n "$spec" ] || invalid_claim
     if [ "$VERB" = header ]; then
       printf 'REQUIRED_REVIEW\nBASE_SHA: %s\nCANDIDATE_SHA: %s\nSPEC_PATH: %s\n' "$base" "$head" "$spec"
       exit 0
@@ -457,22 +388,14 @@ case "$VERB" in
       1) die 14 "PROMPT_SCOPE_MISMATCH: start with review-state.sh header $THREAD" ;;
       *) die 7 "Cannot read the required prompt; restore the runtime and retry" ;;
     esac
-    load_budget
-    token="$(field "$CANDIDATE" claim_token)"; assert_claim "$token"
-    [ "$ATTEMPTS" = "$(field "$CANDIDATE" attempt)" ] || invalid_budget
-    [ "$token" != "$LAST_LAUNCH" ] || die 10 "ALREADY_DISPATCHED: record or abort this claim before another call"
-    [ "$LAUNCHES" -lt "$ALLOWANCE" ] || die 10 "CAP_REACHED: renew the authorized calls"
-    LAST_LAUNCH="$token"; LAUNCHES=$((LAUNCHES + 1))
-    write_loop_state "$LOOP_BASE" "$LOOP_SPEC" "$LOOP_CAP" "$LOOP_START" "$ATTEMPTS"
     ;;
 
   begin)
     assert_no_live_dispatch
     shift 2; BASE_REF=""; SPEC_PATH=""; CAP=""
-    BASE_SEEN=false; SPEC_SEEN=false; CAP_SEEN=false; INTEGRATION=false
+    BASE_SEEN=false; SPEC_SEEN=false; CAP_SEEN=false
     while [ "$#" -gt 0 ]; do
       case "$1" in
-        --integration) ! $INTEGRATION || die 2 "duplicate --integration"; INTEGRATION=true; shift ;;
         --base)
           [ "$#" -ge 2 ] || usage
           ! $BASE_SEEN || die 2 "duplicate --base"
@@ -515,10 +438,13 @@ case "$VERB" in
     FP="$(fingerprint)"; [ -n "$FP" ] || die 13 "cannot fingerprint candidate"
     CURRENT_ROUND="$(review_round)"
     valid_decimal "$CURRENT_ROUND" 7 || die 7 "invalid required-review round counter"
-    load_budget
+    # Review state without its loop cannot start a fresh lifecycle.
+    [ -f "$LOOP_STATE" ] || { [ ! -f "$CANDIDATE" ] && [ ! -f "$REVIEW_STATE" ] && [ ! -f "$APPROVED" ]; } \
+      || invalid_claim
     if [ -f "$PREPARED" ]; then
-      for item in "base_sha=$BASE_SHA" "head=$HEAD_SHA" "fingerprint=$FP" "spec_path=$SPEC_PATH" "cap=$CAP" "integration=$INTEGRATION"; do
-        grep -Fxq -- "$item" "$PREPARED" || die 10 "REVIEW_CONTRACT_CHANGED: resume the interrupted begin on its original candidate"
+      for item in "base_sha=$BASE_SHA" "head=$HEAD_SHA" "fingerprint=$FP" "spec_path=$SPEC_PATH" "cap=$CAP"; do
+        grep -Fxq -- "$item" "$PREPARED" \
+          || die 10 "REVIEW_CONTRACT_CHANGED: resume the interrupted begin on its original candidate"
       done
       publish_claim; exit 0
     fi
@@ -528,13 +454,22 @@ case "$VERB" in
         die 10 "PENDING: finish or abort the claimed review round before begin"
         ;;
       CAP_REACHED)
-        die 10 "CAP_REACHED: report missing approval and continue safe work; another review budget needs user authorization"
+        die 10 "CAP_REACHED: report missing approval and continue safe work; more rounds need the owner's renew"
         ;;
       DIVERGED)
         die 10 "DIVERGED: return disagreements to the owner, continue safe repairs and follow claude-thread Recovery within the remaining authorization"
         ;;
     esac
     if [ -f "$LOOP_STATE" ]; then
+      LOOP_BASE="$(field "$LOOP_STATE" base_sha)"
+      LOOP_SPEC="$(field "$LOOP_STATE" spec_path)"
+      LOOP_CAP="$(field "$LOOP_STATE" cap)"
+      LOOP_START="$(field "$LOOP_STATE" start_round)"
+      ATTEMPTS="$(field "$LOOP_STATE" attempts)"
+      [ -n "$LOOP_BASE" ] && [ -n "$LOOP_SPEC" ] \
+        || die 7 "invalid required review loop contract"
+      case "$LOOP_CAP" in [1-7]) ;; *) die 7 "invalid required review loop cap" ;; esac
+      valid_decimal "$LOOP_START" 7 || die 7 "invalid required review loop state"
       [ "$LOOP_BASE" = "$BASE_SHA" ] \
         && [ "$LOOP_SPEC" = "$SPEC_PATH" ] \
         && [ "$LOOP_CAP" = "$CAP" ] \
@@ -546,36 +481,12 @@ case "$VERB" in
     valid_decimal "$ATTEMPTS" 7 || die 7 "invalid required review attempt state"
     [ "$CURRENT_ROUND" -ge "$LOOP_START" ] \
       || die 7 "required review round counter moved backwards"
-    if unpublished_first_claim; then ATTEMPTS=0; LAUNCHES=0; fi
-    INTEGRATION_OF=""
-    if $INTEGRATION; then
-      case "$STATUS" in
-        APPROVED)
-          cmp -s "$REVIEW_STATE" "$APPROVED" && [ "$(review_round)" = "$(field "$APPROVED" round)" ] \
-            || die 10 "INTEGRATION_REFUSED: approval is incomplete"
-          INTEGRATION_OF="$(field "$APPROVED" head)" ;;
-        RENEWED)
-          [ -z "$RETRY_HEAD" ] || [ "$RETRY_HEAD" = "$HEAD_SHA" ] || die 10 "INTEGRATION_REFUSED: retry the same merge"
-          INTEGRATION_OF="$ANCHOR" ;;
-        ABORTED|NO_FINDINGS)
-          [ "$(field "$CANDIDATE" head)" = "$HEAD_SHA" ] || die 10 "INTEGRATION_REFUSED: retry the same merge"
-          INTEGRATION_OF="$(field "$CANDIDATE" integration_of)" ;;
-      esac
-      [ -n "$INTEGRATION_OF" ] && [ "$(git rev-parse -q --verify HEAD^1)" = "$INTEGRATION_OF" ] \
-        && git rev-parse -q --verify HEAD^2 >/dev/null && ! git rev-parse -q --verify HEAD^3 >/dev/null \
-        || die 10 "INTEGRATION_REFUSED: review other candidates as a normal round"
-      ATTEMPT="$ATTEMPTS"
-    else
-      ATTEMPT=$((ATTEMPTS + 1))
+    if [ "$ATTEMPTS" -ge "$CAP" ]; then
+      [ -f "$CANDIDATE" ] \
+        && write_state CAP_REACHED NONE false foreground "$HEAD_SHA" "$TREE_SHA" "$FP" "$CURRENT_ROUND" cap
+      die 10 "CAP_REACHED: required review already claimed $CAP attempt(s)"
     fi
-    if [ "$LAUNCHES" -ge "$ALLOWANCE" ] || [ "$ATTEMPT" -gt "$ALLOWANCE" ]; then
-      # Keep approval and technical failure metadata for renewal and integration.
-      case "$STATUS" in STALE|NO_DECISION|REQUEST_CHANGES)
-        write_state CAP_REACHED "$(field "$REVIEW_STATE" verdict)" false foreground "$HEAD_SHA" "$TREE_SHA" "$FP" "$CURRENT_ROUND" cap ;;
-      esac
-      die 10 "CAP_REACHED: the current review grant is exhausted"
-    fi
-    ROUND_BEFORE="$CURRENT_ROUND"
+    ATTEMPT=$((ATTEMPTS + 1)); ROUND_BEFORE="$CURRENT_ROUND"
     CLAIMED_AT="$(date +%s 2>/dev/null)"
     case "$CLAIMED_AT" in ''|*[!0-9]*) die 7 "cannot timestamp required-review claim" ;; esac
     CLAIM_EXPIRES_AT=$((CLAIMED_AT + 3600))
@@ -584,10 +495,11 @@ case "$VERB" in
     [ -n "$CLAIM_TOKEN" ] || die 7 "cannot create required-review claim token"
     LOG_BYTES="$(wc -c 2>/dev/null < "$STATE_DIR/$THREAD.log" | tr -d ' ')"; LOG_BYTES="${LOG_BYTES:-0}"
     case "$LOG_BYTES" in ''|*[!0-9]*) die 7 "cannot measure review log" ;; esac
-    printf 'version=2\nhead=%s\ntree=%s\nfingerprint=%s\nbase_sha=%s\nspec_path=%s\ncap=%s\nloop_start_round=%s\nattempt=%s\nclaim_token=%s\nclaim_expires_at=%s\nround_before=%s\nlog_bytes=%s\nintegration=%s\nintegration_of=%s\ntimestamp=%s\n' \
+    printf 'version=1\nhead=%s\ntree=%s\nfingerprint=%s\nbase_sha=%s\nspec_path=%s\ncap=%s\nloop_start_round=%s\nattempt=%s\nclaim_token=%s\nclaim_expires_at=%s\nround_before=%s\nlog_bytes=%s\ntimestamp=%s\n' \
       "$HEAD_SHA" "$TREE_SHA" "$FP" "$BASE_SHA" "$SPEC_PATH" "$CAP" "$LOOP_START" \
       "$ATTEMPT" "$CLAIM_TOKEN" "$CLAIM_EXPIRES_AT" "$ROUND_BEFORE" "$LOG_BYTES" \
-      "$INTEGRATION" "$INTEGRATION_OF" "$(timestamp)" | atomic_write "$PREPARED" || die 7 "cannot prepare claim"
+      "$(timestamp)" | atomic_write "$PREPARED" \
+      || die 7 "cannot prepare claim"
     publish_claim
     ;;
 
@@ -610,12 +522,13 @@ case "$VERB" in
     ATTEMPT="$(field "$CANDIDATE" attempt)"
     LOOP_START="$(field "$CANDIDATE" loop_start_round)"
     HEAD_SHA="$(head_sha 2>/dev/null || true)"; TREE_SHA="$(tree_sha 2>/dev/null || true)"
+    # A runtime failure keeps the claim PENDING so the finished result can still be recorded.
     FP="$(fingerprint)" && [ -n "$FP" ] || die 7 "fingerprint_unavailable: restore the runtime and retry record on this claim"
     VERDICT=""
     if [ -f "$RESULT" ]; then
       VERDICT="$(result_verdict)"; verdict_rc=$?
       case "$verdict_rc:$VERDICT" in
-        0:APPROVE|0:REQUEST_CHANGES|0:NO_FINDINGS|10:) ;;
+        0:APPROVE|0:REQUEST_CHANGES|10:) ;;
         *) die 7 "Cannot read the saved verdict; restore the runtime and retry record on this claim" ;;
       esac
     fi
@@ -644,14 +557,16 @@ case "$VERB" in
       STALE_REASON=dispatch_base_mismatch
     else
       prompt_scope_exact "$PROMPT" "$C_BASE" "$C_HEAD" "$C_SPEC"
-      case "$?" in 0) ;; 1) STALE_REASON=prompt_scope_mismatch ;; *) die 7 "Cannot read the saved prompt; retry record on this claim" ;; esac
+      case "$?" in
+        0) ;;
+        1) STALE_REASON=prompt_scope_mismatch ;;
+        *) die 7 "Cannot read the saved prompt; retry record on this claim" ;;
+      esac
     fi
     if [ -n "$STALE_REASON" ]; then
       write_state STALE "${VERDICT:-NONE}" false foreground "$HEAD_SHA" "$TREE_SHA" "${DISPATCH_FP:-unknown}" "$ROUND_NOW" "$STALE_REASON"
       die 11 "STALE ($STALE_REASON): verdict does not cover the current clean candidate"
     fi
-    load_budget
-    if [ "$(field "$CANDIDATE" version)" = 2 ] && [ "$LAST_LAUNCH" != "$4" ]; then invalid_budget; fi
     case "$VERDICT" in
       APPROVE)
         write_state APPROVED APPROVE true foreground "$C_HEAD" "$C_TREE" "$C_FP" "$ROUND_NOW" exact_candidate_approved
@@ -661,31 +576,18 @@ case "$VERB" in
         trap - EXIT HUP INT TERM
         bash "$SELF_DIR/review-state.sh" check "$THREAD"
         ;;
-      NO_FINDINGS)
-        if [ -z "$(field "$CANDIDATE" integration_of)" ]; then
-          [ "$ATTEMPT" -gt 0 ] || invalid_budget
-          refunded=$((ATTEMPT - 1))
-          case "$ATTEMPTS" in
-            "$ATTEMPT") write_loop_state "$C_BASE" "$C_SPEC" "$C_CAP" "$LOOP_START" "$refunded" ;;
-            "$refunded") ;; # Replay after the refund was published.
-            *) invalid_budget ;;
-          esac
-        fi
-        write_state NO_FINDINGS REQUEST_CHANGES false foreground "$C_HEAD" "$C_TREE" "$C_FP" "$ROUND_NOW" empty_findings
-        die 10 "NO_FINDINGS: REQUEST_CHANGES needs a file:line finding. Call spent, remaining=$((ALLOWANCE - LAUNCHES))"
-        ;;
       REQUEST_CHANGES)
-        if [ "$ATTEMPT" -ge "$ALLOWANCE" ] || [ "$LAUNCHES" -ge "$ALLOWANCE" ]; then
+        if [ "$ATTEMPT" -ge "$C_CAP" ]; then
           write_state CAP_REACHED REQUEST_CHANGES false foreground "$C_HEAD" "$C_TREE" "$C_FP" "$ROUND_NOW" cap
-          die 10 "CAP_REACHED: blocking findings remain and the review grant is exhausted"
+          die 10 "CAP_REACHED: blocking findings remain after $C_CAP attempt(s)"
         fi
         write_state REQUEST_CHANGES REQUEST_CHANGES false foreground "$C_HEAD" "$C_TREE" "$C_FP" "$ROUND_NOW" blocking_findings_open
         die 10 "REQUEST_CHANGES: commit valid fixes as a new candidate, or keep the same candidate for refuted/deferred findings; then begin and review again"
         ;;
       *)
-        if [ "$ATTEMPT" -ge "$ALLOWANCE" ] || [ "$LAUNCHES" -ge "$ALLOWANCE" ]; then
+        if [ "$ATTEMPT" -ge "$C_CAP" ]; then
           write_state CAP_REACHED NONE false foreground "$C_HEAD" "$C_TREE" "$C_FP" "$ROUND_NOW" cap
-          die 10 "CAP_REACHED: review grant exhausted without approval"
+          die 10 "CAP_REACHED: no approval after $C_CAP attempt(s)"
         fi
         write_state NO_DECISION NONE false foreground "$C_HEAD" "$C_TREE" "$C_FP" "$ROUND_NOW" no_approve_verdict
         die 10 "NO_DECISION: required review did not return APPROVE"
@@ -705,7 +607,7 @@ case "$VERB" in
     NOW_BYTES="$(wc -c 2>/dev/null < "$STATE_DIR/$THREAD.log" | tr -d ' ')"; NOW_BYTES="${NOW_BYTES:-0}"
     valid_decimal "$ROUND_BEFORE" 7 && valid_decimal "$ROUND_NOW" 7 \
       && case "$OLD_BYTES:$NOW_BYTES" in *[!0-9:]*) false ;; *) true ;; esac \
-      || die 10 "INVALID_CLAIM_STATE: inspect saved state; follow claude-thread Recovery before resetting"
+      || invalid_claim
     [ "$ROUND_NOW" = "$ROUND_BEFORE" ] && [ "$NOW_BYTES" = "$OLD_BYTES" ] \
       || die 10 "ROUND_COMPLETED: record the finished dispatch instead of aborting its claim"
     for artifact in last-prompt last-result last-fingerprint; do
@@ -713,13 +615,13 @@ case "$VERB" in
         || die 10 "ROUND_COMPLETED: record the published dispatch result instead of aborting its claim"
     done
     ATTEMPT="$(field "$CANDIDATE" attempt)"
-    load_budget
-    valid_decimal "$ATTEMPT" 7 && [ "$ATTEMPTS" = "$ATTEMPT" ] \
-      || die 10 "INVALID_CLAIM_STATE: inspect saved state; follow claude-thread Recovery before resetting"
-    if [ -z "$(field "$CANDIDATE" integration_of)" ]; then
-      [ "$ATTEMPT" -gt 0 ] || invalid_budget
-      write_loop_state "$LOOP_BASE" "$LOOP_SPEC" "$LOOP_CAP" "$LOOP_START" "$((ATTEMPT - 1))"
-    fi
+    LOOP_BASE="$(field "$LOOP_STATE" base_sha)"; LOOP_SPEC="$(field "$LOOP_STATE" spec_path)"
+    LOOP_CAP="$(field "$LOOP_STATE" cap)"; LOOP_START="$(field "$LOOP_STATE" start_round)"
+    LOOP_ATTEMPTS="$(field "$LOOP_STATE" attempts)"
+    valid_decimal "$ATTEMPT" 7 && valid_decimal "$LOOP_ATTEMPTS" 7 \
+      && [ "$ATTEMPT" -gt 0 ] && [ "$LOOP_ATTEMPTS" = "$ATTEMPT" ] \
+      || invalid_claim
+    write_loop_state "$LOOP_BASE" "$LOOP_SPEC" "$LOOP_CAP" "$LOOP_START" "$((ATTEMPT - 1))"
     HEAD_SHA="$(head_sha 2>/dev/null || true)"; TREE_SHA="$(tree_sha 2>/dev/null || true)"; FP="$(fingerprint)"
     write_state ABORTED NONE false foreground "$HEAD_SHA" "$TREE_SHA" "$FP" "$ROUND_NOW" "$3"
     die 10 "ABORTED: required-review round released after $3"
@@ -777,49 +679,21 @@ case "$VERB" in
     echo "CODEX_CC_REQUIRED_REVIEW APPROVE thread=$THREAD head=$HEAD_SHA tree=$TREE_SHA fingerprint=$FP base_sha=$(field "$APPROVED" base_sha) spec_path=$(field "$APPROVED" spec_path)"
     ;;
   renew)
-    shift 2; WHO=""; EXTRA=1; GRANT=""; seen=" "
-    while [ "$#" -gt 0 ]; do
-      [ "$#" -ge 2 ] || usage
-      [[ "$seen" != *" $1 "* ]] || die 2 "duplicate $1"; seen="$seen$1 "
-      case "$1" in --by) WHO="$2" ;; --rounds) EXTRA="$2" ;; --grant) GRANT="$2" ;; *) usage ;; esac
-      shift 2
-    done
-    case "$WHO" in ''|*[[:cntrl:]]*) die 2 "--by needs a single-line owner" ;; esac
-    case "$GRANT" in *[[:cntrl:]]*) die 2 "--grant needs a single-line decision ID" ;; esac
-    valid_decimal "$EXTRA" 7 && [ "$EXTRA" -gt 0 ] || die 2 "--rounds needs a positive integer"
+    # The owner authorized more rounds: base, spec, cap and the Claude session stay.
+    [ "$#" -eq 4 ] && [ "$3" = --by ] || usage
+    case "$4" in ''|*[[:cntrl:]]*) die 2 "--by needs a single-line owner" ;; esac
     assert_no_live_dispatch
-    [ -f "$LOOP_STATE" ] || die 10 "RENEW_REFUSED: no review contract"
-    load_budget
-    terms="$(printf '%s\n' "$WHO" "$EXTRA" | git hash-object --stdin)" || die 7 "cannot identify grant"
-    key="$terms"
-    if [ -n "$GRANT" ]; then
-      id="$(printf '%s\n' "$GRANT" | git hash-object --stdin)" || die 7 "cannot identify decision"
-      key="$id.$terms"
-      if [[ " $GRANTS " == *" $id."* && " $GRANTS " != *" $key "* ]]; then
-        die 10 "GRANT_MISMATCH: this decision ID already has different terms"
-      fi
-    fi
-    status="$(field "$REVIEW_STATE" status)"; token="$(field "$CANDIDATE" claim_token)"
-    if [[ " $GRANTS " == *" $key "* ]]; then
-      echo "ALREADY_RENEWED thread=$THREAD remaining=$((ALLOWANCE - LAUNCHES))"; exit 0
-    fi
-    case "$status" in PENDING|DIVERGED) die 10 "RENEW_REFUSED: resolve $status first" ;; esac
-    [ "$status" = CAP_REACHED ] || [ "$LAUNCHES" -ge "$ALLOWANCE" ] || die 10 "RENEW_REFUSED: calls remain"
-    ANCHOR=""; RETRY_HEAD=""
-    case "$status" in
-      APPROVED)
-        cmp -s "$REVIEW_STATE" "$APPROVED" && [ "$(review_round)" = "$(field "$APPROVED" round)" ] || invalid_budget
-        ANCHOR="$(field "$APPROVED" head)"
-        [ -n "$ANCHOR" ] && [ "$(head_sha)" != "$ANCHOR" ] || die 10 "RENEW_REFUSED: approval covers this HEAD" ;;
-      ABORTED|NO_FINDINGS)
-        ANCHOR="$(field "$CANDIDATE" integration_of)"
-        RETRY_HEAD="$(field "$CANDIDATE" head)" ;;
-    esac
-    GRANTS="${GRANTS:+$GRANTS }$key"; R_BY="$WHO"; R_FROM="$token"
-    ALLOWANCE="$EXTRA"; LAUNCHES=0; LAST_LAUNCH=""
-    write_loop_state "$LOOP_BASE" "$LOOP_SPEC" "$LOOP_CAP" "$(review_round)" 0
-    write_state RENEWED NONE false foreground "$(head_sha)" "$(tree_sha)" "" "$(review_round)" budget_renewed
-    echo "RENEWED thread=$THREAD remaining=$((ALLOWANCE - LAUNCHES)) authorized_by=$WHO"
+    [ -f "$LOOP_STATE" ] || die 10 "INVALID_CLAIM_STATE: no review loop to renew"
+    STATUS="$(field "$REVIEW_STATE" status)"
+    [ "$STATUS" = CAP_REACHED ] \
+      || die 10 "RENEW_REFUSED: renew follows CAP_REACHED; the thread is ${STATUS:-without a status}"
+    LOOP_BASE="$(field "$LOOP_STATE" base_sha)"; LOOP_SPEC="$(field "$LOOP_STATE" spec_path)"
+    LOOP_CAP="$(field "$LOOP_STATE" cap)"; ROUND_NOW="$(review_round)"
+    [ -n "$LOOP_BASE" ] && [ -n "$LOOP_SPEC" ] && case "$LOOP_CAP" in [1-7]) true ;; *) false ;; esac \
+      || die 7 "invalid required review loop contract"
+    write_loop_state "$LOOP_BASE" "$LOOP_SPEC" "$LOOP_CAP" "$ROUND_NOW" 0 "$4"
+    write_state RENEWED NONE false foreground "$(head_sha 2>/dev/null || true)" "$(tree_sha 2>/dev/null || true)" "" "$ROUND_NOW" renewed
+    echo "RENEWED thread=$THREAD attempts=0/$LOOP_CAP authorized_by=$4"
     ;;
   reset)
     [ "$#" -eq 2 ] || usage

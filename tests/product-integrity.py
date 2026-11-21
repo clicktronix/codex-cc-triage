@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Actual driver/gate routes with a fake Claude CLI; no paid calls."""
+"""Actual driver/gate routes with a fake Claude CLI; no model calls."""
 import os
 from pathlib import Path
 import re
@@ -7,7 +7,6 @@ import subprocess
 import tempfile
 import tarfile
 import unittest
-from concurrent.futures import ThreadPoolExecutor
 
 ROOT=Path(__file__).resolve().parents[1]
 SCRIPTS=ROOT/'plugins/codex-cc-triage/scripts'
@@ -53,7 +52,7 @@ class ProductIntegrity(unittest.TestCase):
         claim=self.begin();p=self.dispatch();self.assertEqual(p.returncode,0,p.stderr)
         p=self.gate('record','review','foreground',claim);self.assertEqual(p.returncode,0,p.stderr)
 
-    def test_wrong_actual_base_fails_before_paid_dispatch(self):
+    def test_wrong_actual_base_fails_before_dispatch(self):
         claim=self.begin();p=self.dispatch(self.head)
         self.assertEqual(p.returncode,11,p.stderr)
         self.assertFalse((self.root/'args').exists())
@@ -65,7 +64,7 @@ class ProductIntegrity(unittest.TestCase):
         (self.sd/'review.last-base').write_text(self.head+'\n')
         self.assertEqual(self.gate('record','review','foreground',claim).returncode,11)
 
-    def test_parser_failure_keeps_the_paid_result_for_record(self):
+    def test_parser_failure_keeps_the_result_for_record(self):
         claim = self.begin()
         self.assertEqual(self.dispatch().returncode, 0)
         broken = self.root/'python-stub'
@@ -106,7 +105,149 @@ class ProductIntegrity(unittest.TestCase):
         self.assertEqual(dispatched.returncode, 0, dispatched.stderr)
         return self.gate('record', 'review', 'foreground', token)
 
-    def test_seven_calls_unicode_marker_and_pinned_cap(self):
+    def live_process(self):
+        process = subprocess.Popen(['sleep', '30'])
+        self.addCleanup(process.wait); self.addCleanup(process.kill)
+        return process
+
+    def together(self, *calls):
+        workers = [subprocess.Popen(['bash', str(SCRIPTS/'review-state.sh'), *args], cwd=self.repo, env=self.env,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for args in calls]
+        results = []
+        for worker in workers:
+            out, err = worker.communicate(timeout=30)
+            results.append((worker.returncode, out, err))
+        return sorted(results)
+
+    def test_each_owner_renewal_grants_a_new_round_on_the_same_session(self):
+        changes = 'subject.py:1 fix\nREQUEST_CHANGES'
+        self.assertIn('CAP_REACHED', self.launch_and_record(self.claim('--cap', '1'), changes).stderr)
+        session = (self.sd/'review.id').read_text().strip()
+        for verdict in (changes, 'APPROVE'):
+            renewed = self.gate('renew', 'review', '--by', 'owner')
+            self.assertEqual(renewed.returncode, 0, renewed.stderr)
+            self.assertEqual(renewed.stdout, 'RENEWED thread=review attempts=0/1 authorized_by=owner\n')
+            repeated = self.gate('renew', 'review', '--by', 'owner')
+            self.assertEqual(repeated.returncode, 10, repeated.stdout)
+            self.assertIn('RENEW_REFUSED', repeated.stderr)
+            result = self.launch_and_record(self.claim(), verdict)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(result.stdout.startswith('CODEX_CC_REQUIRED_REVIEW APPROVE thread=review '))
+        self.assertEqual((self.sd/'review.id').read_text().strip(), session)
+        args = (self.root/'args').read_text().splitlines()
+        self.assertEqual([args[i + 1] for i, arg in enumerate(args) if arg == '--resume'], [session, session])
+        loop = (self.sd/'review.review-loop').read_text().splitlines()
+        for line in ('version=1', f'base_sha={self.base}', 'spec_path=spec.md', 'cap=1', 'attempts=1', 'renewed_by=owner'):
+            self.assertIn(line, loop)
+
+    def test_renew_refuses_unless_the_cap_was_reached(self):
+        missing = self.gate('renew', 'review', '--by', 'owner')
+        self.assertEqual(missing.returncode, 10, missing.stderr)
+        self.assertIn('INVALID_CLAIM_STATE', missing.stderr)
+        token = self.claim('--cap', '1')
+        self.assertIn('RENEW_REFUSED', self.gate('renew', 'review', '--by', 'owner').stderr)
+        self.assertIn('CAP_REACHED', self.launch_and_record(token, 'subject.py:1 fix\nREQUEST_CHANGES').stderr)
+        for owner in ('', 'first\nsecond'):
+            self.assertEqual(self.gate('renew', 'review', '--by', owner).returncode, 2)
+        self.assertEqual(self.gate('renew', 'review', '--by').returncode, 2)
+        worker = self.live_process()
+        lease = self.sd/'review.active'; lease.mkdir(); (lease/'pid').write_text(f'{worker.pid}\n')
+        loop = (self.sd/'review.review-loop').read_bytes()
+        live = self.gate('renew', 'review', '--by', 'owner')
+        self.assertEqual(live.returncode, 10, live.stderr)
+        self.assertEqual((self.sd/'review.review-loop').read_bytes(), loop)
+        worker.kill(); worker.wait()
+        self.assertEqual(self.gate('renew', 'review', '--by', 'owner').returncode, 0)
+
+    def test_concurrent_state_changes_on_one_thread_have_defined_results(self):
+        begin = ('begin', 'review', '--base', self.base, '--spec', 'spec.md', '--cap', '1')
+        for _ in range(5):
+            # Each trial starts before migration, so both callers contend for the cold lock.
+            subprocess.run(['rm', '-rf', str(self.repo/'.git/codex-cc-triage')], check=True)
+            results = self.together(begin, begin)
+            self.assertEqual([rc for rc, _, _ in results], [0, 10], results)
+            self.assertIn('PENDING:', results[1][2])
+        token = re.search(r'claim=([a-f0-9]+)', results[0][1])[1]
+        self.assertIn('CAP_REACHED', self.launch_and_record(token, 'subject.py:1 fix\nREQUEST_CHANGES').stderr)
+        renew = ('renew', 'review', '--by', 'owner')
+        results = self.together(renew, renew)
+        self.assertEqual([rc for rc, _, _ in results], [0, 10], results)
+        self.assertTrue(results[0][1].startswith('RENEWED '))
+        self.assertIn('RENEW_REFUSED', results[1][2])
+
+    def snapshot_fingerprint(self):
+        p = self.cmd(['python3', SCRIPTS/'repo_snapshot.py', 'fingerprint', '--root', self.repo,
+                      '--state-rel', '.agent-state/codex-cc-triage'])
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return p.stdout.strip()
+
+    def write_0_7_1_thread(self, attempts, status, rounds):
+        """The files 0.7.1 writes for one required thread; it never wrote .worktree."""
+        self.sd.mkdir(parents=True)
+        tree = self.git('rev-parse', 'HEAD^{tree}').stdout.strip()
+        fp = self.snapshot_fingerprint(); token = 'a' * 40
+        (self.sd/'review.review-loop').write_text(
+            f'version=1\nbase_sha={self.base}\nspec_path=spec.md\ncap=5\nstart_round=0\nattempts={attempts}\n'
+            'timestamp=2026-11-01T00:00:00Z\n')
+        (self.sd/'review.candidate').write_text(
+            f'version=1\nhead={self.head}\ntree={tree}\nfingerprint={fp}\nbase_sha={self.base}\nspec_path=spec.md\n'
+            f'cap=5\nloop_start_round=0\nattempt={attempts}\nclaim_token={token}\nclaim_expires_at=9999999999\n'
+            f'round_before={rounds - (status != "PENDING")}\nlog_bytes=0\ntimestamp=2026-11-01T00:00:00Z\n')
+        (self.sd/'review.review-state').write_text(
+            f'version=1\nstatus={status}\nverdict=NONE\ngate_eligible=false\nmode=foreground\nhead={self.head}\n'
+            f'tree={tree}\nfingerprint={fp}\nbase_sha={self.base}\nspec_path=spec.md\ncap=5\nloop_start_round=0\n'
+            f'claim_token={token}\nclaim_expires_at=9999999999\nround={rounds}\nreason=-\n'
+            'timestamp=2026-11-01T00:00:00Z\n')
+        if rounds:
+            (self.sd/'review.id').write_text('11111111-1111-4111-8111-111111111111\n')
+            (self.sd/'review.mode').write_text('review\n')
+            (self.sd/'review.base').write_text(self.base + '\n')
+            (self.sd/'review.log').write_text(''.join(
+                f'\n## 2026-11-01T00:00:0{n}Z mode=review\n\n### prompt\n\nold\n' for n in range(rounds)))
+        return token
+
+    def test_a_thread_written_by_0_7_1_continues_at_its_pinned_cap(self):
+        self.write_0_7_1_thread(2, 'REQUEST_CHANGES', 2)
+        begun = self.gate('begin', 'review', '--base', self.base, '--spec', 'spec.md')
+        self.assertEqual(begun.returncode, 0, begun.stderr)
+        self.assertIn('attempt=3/5', begun.stdout)
+        token = re.search(r'claim=([a-f0-9]+)', begun.stdout)[1]
+        self.assertEqual(self.launch_and_record(token, 'APPROVE').returncode, 0)
+        self.assertIn('--resume', (self.root/'args').read_text().splitlines())
+
+    def test_a_pending_claim_written_by_0_7_1_dispatches_and_records(self):
+        token = self.write_0_7_1_thread(1, 'PENDING', 0)
+        recorded = self.launch_and_record(token, 'APPROVE')
+        self.assertEqual(recorded.returncode, 0, recorded.stderr)
+        self.assertTrue(recorded.stdout.rstrip().endswith('spec_path=spec.md'))
+
+    def test_state_files_keep_the_0_7_1_format(self):
+        self.assertEqual(self.launch_and_record(self.claim(), 'APPROVE').returncode, 0)
+        for suffix in ('review-loop', 'candidate', 'review-state', 'approved'):
+            text = (self.sd/f'review.{suffix}').read_text()
+            self.assertTrue(text.startswith('version=1\n'), suffix)
+            for key in ('allowance=', 'launches=', 'last_launch=', 'grants=', 'renewed_from=', 'integration'):
+                self.assertNotIn(key, text, suffix)
+
+    def test_refused_dispatch_writes_no_required_state(self):
+        self.approve()
+        self.begin()
+        before = {p.name: p.read_bytes() for p in self.sd.iterdir()}
+        (self.root/'args').unlink()
+        self.prompt = 'Review without the scope header.\n'
+        refused = self.dispatch()
+        self.assertEqual(refused.returncode, 14, refused.stderr)
+        self.assertFalse((self.root/'args').exists())
+        self.assertEqual({p.name: p.read_bytes() for p in self.sd.iterdir()}, before)
+        # A migrated repository never waits for the migration lock, even while another process holds it.
+        holder = self.live_process()
+        lock = self.repo/'.git/codex-cc-triage/migration.lock'; lock.mkdir()
+        (lock/'owner').write_text(f'{holder.pid}\n')
+        advisory = self.cmd(['bash', SCRIPTS/'claude-thread.sh', 'dispatch', 'ask', 'aside'], 'A question.\n')
+        self.assertEqual(advisory.returncode, 0, advisory.stderr)
+        self.assertEqual((lock/'owner').read_text(), f'{holder.pid}\n')
+
+    def test_seven_rounds_unicode_marker_and_pinned_cap(self):
         path = 'Документы/План работ.md'
         spec = self.repo/path
         spec.parent.mkdir()
@@ -121,37 +262,10 @@ class ProductIntegrity(unittest.TestCase):
             else:
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertTrue(result.stdout.rstrip().endswith('spec_path='+path))
-        self.assertIn('launches=7\n', (self.sd/'review.review-loop').read_text())
+        loop = (self.sd/'review.review-loop').read_text().splitlines()
+        self.assertIn('version=1', loop); self.assertIn('attempts=7', loop)
         for bad in ['0', '8']:
             self.assertEqual(self.gate('begin','review','--base',self.base,'--spec',path,'--cap',bad).returncode,2)
-
-    def test_failure_spends_one_call_and_grants_are_exact(self):
-        token = self.claim('--cap','1')
-        self.env['FAKE_CLAUDE_SILENT_FAIL'] = '1'
-        self.assertEqual(self.dispatch().returncode, 3)
-        self.assertIn('ALREADY_DISPATCHED', self.dispatch().stderr)
-        del self.env['FAKE_CLAUDE_SILENT_FAIL']
-        self.assertIn('ABORTED', self.gate('abort','review','dispatch-failure',token).stderr)
-        self.assertIn('CAP_REACHED', self.gate('begin','review','--base',self.base,'--spec','spec.md').stderr)
-        args = ('renew','review','--by','Иван (owner), #7','--rounds','3','--grant','decision-1')
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            results = [pool.submit(self.gate, *args) for _ in range(2)]
-            for result in results:
-                renewal = result.result()
-                self.assertIn('remaining=3', renewal.stdout, renewal.stderr)
-        self.assertEqual(self.gate('mode','review').stdout.strip(), 'required')
-        self.assertEqual(self.gate('advisory-check','review').returncode, 10)
-        for i in range(3):
-            state = self.launch_and_record(self.claim(), 'subject.py:1 fix it\nREQUEST_CHANGES')
-            self.assertIn('CAP_REACHED' if i == 2 else 'REQUEST_CHANGES', state.stderr)
-        self.assertIn('remaining=0',self.gate(*args).stdout)
-        self.assertIn('GRANT_MISMATCH',self.gate('renew','review','--by','owner','--grant','decision-1').stderr)
-        self.assertEqual((self.root/'args').read_text().splitlines().count('-p'),4)
-        self.assertIn('remaining=1',self.gate('renew','review','--by','owner').stdout)
-        empty = self.launch_and_record(self.claim(), 'Could not connect to 127.0.0.1:5432.\nREQUEST_CHANGES')
-        self.assertIn('NO_FINDINGS',empty.stderr)
-        loop = (self.sd/'review.review-loop').read_text().splitlines()
-        self.assertIn('cap=1',loop); self.assertIn('attempts=0',loop); self.assertIn('launches=1',loop)
 
     def test_interrupted_first_claim_is_recoverable(self):
         token = self.claim('--cap','1')
@@ -163,76 +277,9 @@ class ProductIntegrity(unittest.TestCase):
             (self.sd/('review.'+suffix)).unlink()
         self.assertEqual(self.claim(), token)
         self.assertEqual(self.launch_and_record(token, 'APPROVE').returncode, 0)
-        # Missing accounting in an established lifecycle cannot mint a fresh grant.
+        # An established lifecycle without its loop cannot start a fresh one.
         (self.sd/'review.review-loop').unlink()
         self.assertIn('INVALID_CLAIM_STATE',self.gate('begin','review','--base',self.base,'--spec','spec.md').stderr)
-
-    def test_legacy_first_reservation_and_approval_remain_usable(self):
-        self.sd.mkdir(parents=True)
-        loop = self.sd/'review.review-loop'
-        loop.write_text(f'version=1\nbase_sha={self.base}\nspec_path=spec.md\ncap=1\nstart_round=0\nattempts=1\n')
-        token=self.claim()
-        self.assertIn('allowance=1\n',loop.read_text())
-        self.assertEqual(self.launch_and_record(token,'APPROVE').returncode,0)
-        # V1 approvals keep the original marker and the original launch ceiling.
-        legacy = f'version=1\nbase_sha={self.base}\nspec_path=spec.md\ncap=1\nstart_round=0\nattempts=1\n'
-        loop.write_text(legacy)
-        self.assertEqual(self.gate('check','review').returncode,0)
-        self.assertIn('CAP_REACHED',self.gate('begin','review','--base',self.base,'--spec','spec.md').stderr)
-
-    def test_existing_v1_session_can_launch_its_unstarted_pending_round(self):
-        self.approve()
-        claim = self.begin()
-        loop = self.sd/'review.review-loop'
-        loop.write_text(f'version=1\nbase_sha={self.base}\nspec_path=spec.md\ncap=3\nstart_round=0\nattempts=2\n')
-        self.assertTrue((self.sd/'review.mode').is_file())
-        os.utime(self.sd/'review.mode', (1000000,1000000))
-        self.assertEqual(self.launch_and_record(claim,'APPROVE').returncode,0)
-        self.assertIn('launches=2\n',loop.read_text())
-
-    def test_legacy_pending_with_a_newer_started_worker_preserves_history(self):
-        token = self.claim('--cap','1')
-        loop=self.sd/'review.review-loop'
-        loop.write_text(f'version=1\nbase_sha={self.base}\nspec_path=spec.md\ncap=1\nstart_round=0\nattempts=1\n')
-        os.utime(self.sd/'review.candidate',(1000000,1000000))
-        (self.sd/'review.mode').write_text('review\n')
-        self.assertIn('ALREADY_DISPATCHED',self.dispatch().stderr)
-        self.assertFalse((self.root/'args').exists())
-        self.assertIn('ABORTED',self.gate('abort','review','tool-failure',token).stderr)
-        self.assertIn('CAP_REACHED',self.gate('begin','review','--base',self.base,'--spec','spec.md').stderr)
-
-    def test_interrupted_renewal_preserves_the_granted_balance(self):
-        self.launch_and_record(self.claim('--cap','1'),'subject.py:1 fix\nREQUEST_CHANGES')
-        state = self.sd/'review.review-state'
-        old_state = state.read_bytes()
-        self.assertIn('remaining=3',self.gate('renew','review','--by','owner','--rounds','3').stdout)
-        state.write_bytes(old_state)
-        self.assertIn('RENEW_REFUSED',self.gate('renew','review','--by','another owner').stderr)
-        self.assertIn('status=RENEWED\n',state.read_text())
-        self.claim()
-        self.assertIn('allowance=3\n',(self.sd/'review.review-loop').read_text())
-
-    def test_integrated_candidate_retries_only_technical_failures(self):
-        token=self.claim('--cap','1')
-        self.assertEqual(self.launch_and_record(token,'APPROVE').returncode,0)
-        self.git('checkout','-qb','target',self.base)
-        (self.repo/'target.txt').write_text('target\n')
-        self.git('add','target.txt'); self.git('commit','-qm','Advance target')
-        self.git('checkout','-q','main'); self.git('merge','--no-ff','-qm','Integrate target','target')
-        merge=self.git('rev-parse','HEAD').stdout.strip()
-        self.assertIn('remaining=1',self.gate('renew','review','--by','owner','--grant','integrate').stdout)
-        token=self.claim('--integration')
-        self.assertIn('attempt=0\n',(self.sd/'review.candidate').read_text())
-        self.assertIn('NO_FINDINGS',self.launch_and_record(token,'REQUEST_CHANGES').stderr)
-        self.git('commit','--amend','-qm','A different merge')
-        self.assertIn('remaining=1',self.gate('renew','review','--by','owner','--grant','retry').stdout)
-        begin=('begin','review','--base',self.base,'--spec','spec.md','--integration')
-        self.assertIn('INTEGRATION_REFUSED',self.gate(*begin).stderr)
-        self.git('checkout','--detach',merge)
-        self.assertIn('CAP_REACHED',self.launch_and_record(self.claim('--integration'),'subject.py:1 fix\nREQUEST_CHANGES').stderr)
-        self.assertIn('remaining=1',self.gate('renew','review','--by','owner','--grant','fix').stdout)
-        self.assertIn('INTEGRATION_REFUSED',self.gate(*begin).stderr)
-        self.assertEqual(self.launch_and_record(self.claim(),'APPROVE').returncode,0)
 
     def test_partial_staging_retains_both_patches(self):
         (self.repo/'subject.py').write_text('VALUE = 3\n');self.git('add','subject.py')
@@ -341,11 +388,9 @@ class ProductIntegrity(unittest.TestCase):
         self.assertEqual((self.sd/'review.review-loop').read_bytes(),loop)
         candidate.write_text(saved)
         self.assertEqual(self.dispatch().returncode,0)
-        charged=(self.sd/'review.review-loop').read_bytes()
-        self.assertIn(b'launches=1\n',charged)
         self.assertEqual(self.gate('record','review','foreground',claim).returncode,0)
         self.assertEqual(self.gate('check','review').returncode,0)
-        self.assertEqual((self.sd/'review.review-loop').read_bytes(),charged)
+        self.assertEqual((self.sd/'review.review-loop').read_bytes(),loop)
 
     def test_mutating_reviewer_never_publishes_a_completed_result(self):
         claim=self.begin()

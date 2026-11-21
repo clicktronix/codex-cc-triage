@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 # Shared generation-safe directory-lock primitives for codex-cc-triage scripts.
+#
+# The lock is the owner file, created exclusively by the shell and read back; the directory only
+# holds it. `mkdir` is not the test-and-set: uutils coreutils 0.10 (Ubuntu 26.04) exits 0 for both
+# of two racing calls on one path, so a caller that created the directory may find another owner in
+# it and is then an ordinary contender.
 
 codex_cc_lock_link_count() {
   local path="$1" count
@@ -29,11 +34,6 @@ codex_cc_lock_assert_safe() {
   [ ! -L "$owner_path" ] || return 7
   [ ! -e "$owner_path" ] || [ -f "$owner_path" ] || return 7
   [ ! -e "$owner_path" ] || codex_cc_lock_assert_single_link "$owner_path"
-}
-
-# TEMPORARY DIAGNOSTIC: remove with the CI trace step.
-codex_cc_lock_trace() {
-  [ -z "${CODEX_CC_TRIAGE_LOCK_TRACE:-}" ] || printf '%s %s %s\n' "${EPOCHREALTIME:-0}" "$$" "$*" >> "$CODEX_CC_TRIAGE_LOCK_TRACE"
 }
 
 codex_cc_lock_mtime_epoch() {
@@ -72,11 +72,8 @@ codex_cc_lock_release_owned() {
   [ -f "$lock_dir/$owner_name" ] || return 0
   codex_cc_lock_assert_single_link "$lock_dir/$owner_name" || return 0
   [ "$(cat "$lock_dir/$owner_name" 2>/dev/null)" = "$expected_owner" ] || return 0
-  codex_cc_lock_trace "release-begin ${lock_dir##*/}"
   rm -f "$lock_dir/$owner_name" 2>/dev/null
-  codex_cc_lock_trace "release-owner-removed ${lock_dir##*/}"
   rmdir "$lock_dir" 2>/dev/null || true
-  codex_cc_lock_trace "release-rmdir-done ${lock_dir##*/}"
 }
 
 codex_cc_lock_guard_acquire() {

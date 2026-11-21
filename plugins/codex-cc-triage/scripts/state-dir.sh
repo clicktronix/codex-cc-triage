@@ -215,7 +215,6 @@ remove_owned_lock() {
   codex_cc_lock_release_owned "$1" owner "$$"
 }
 cleanup_migration_locks() {
-  codex_cc_lock_trace "exit-trap"
   remove_owned_lock "$RECLAIM_LOCK"
   remove_owned_lock "$LOCK"
 }
@@ -241,17 +240,13 @@ while :; do
   assert_lock_safe "$LOCK"
   assert_lock_safe "$RECLAIM_LOCK"
   if mkdir "$LOCK" 2>/dev/null; then
-    codex_cc_lock_trace "mkdir-ok"
     # Only the caller that reads back its own PID owns the lock. One that finds
     # another owner in the directory it just created waits like any contender.
     if (set -C; printf '%s\n' "$$" > "$LOCK/owner") 2>/dev/null \
         && [ "$(cat "$LOCK/owner" 2>/dev/null)" = "$$" ]; then
-      codex_cc_lock_trace "own"
       break
     fi
-    codex_cc_lock_trace "FOREIGN owner=$(cat "$LOCK/owner" 2>/dev/null) dir=$([ -d "$LOCK" ] && echo present || echo absent)"
-  elif codex_cc_lock_trace "mkdir-eexist owner=$(cat "$LOCK/owner" 2>/dev/null)"; acquire_reclaim_lock; then
-    codex_cc_lock_trace "reclaim-lock-held"
+  elif acquire_reclaim_lock; then
     # Re-sample only while holding the separate reclamation guard. This keeps
     # a contender from acting on the generation another process replaced.
     assert_lock_safe "$LOCK"
@@ -280,7 +275,6 @@ while :; do
         fi
       fi
     fi
-    codex_cc_lock_trace "reclaim-decision stale=$reclaim"
     remove_owned_lock "$RECLAIM_LOCK"
     $reclaim && continue
   fi

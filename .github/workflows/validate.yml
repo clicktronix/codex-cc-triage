@@ -15,19 +15,3 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: bash tests/run.sh
-      - name: mkdir race probe (temporary diagnostic, to be removed)
-        if: always() && runner.os == 'Linux'
-        run: |
-          . /etc/os-release; echo "os: $PRETTY_NAME"
-          mkdir --version 2>&1 | head -n 2
-          ls -l "$(command -v mkdir)"
-          cd "$(mktemp -d)"
-          both=0; one=0; none=0
-          for i in $(seq 1 3000); do
-            rm -rf d a b
-            ( mkdir d 2>/dev/null && : > a ) &
-            ( mkdir d 2>/dev/null && : > b ) &
-            wait
-            if [ -e a ] && [ -e b ]; then both=$((both+1)); elif [ -e a ] || [ -e b ]; then one=$((one+1)); else none=$((none+1)); fi
-          done
-          echo "two simultaneous 'mkdir d': both exit 0 in $both of 3000 trials; exactly one in $one; none in $none"

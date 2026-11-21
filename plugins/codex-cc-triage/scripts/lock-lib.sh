@@ -31,6 +31,11 @@ codex_cc_lock_assert_safe() {
   [ ! -e "$owner_path" ] || codex_cc_lock_assert_single_link "$owner_path"
 }
 
+# TEMPORARY DIAGNOSTIC: remove with the CI trace step.
+codex_cc_lock_trace() {
+  [ -z "${CODEX_CC_TRIAGE_LOCK_TRACE:-}" ] || printf '%s %s %s\n' "${EPOCHREALTIME:-0}" "$$" "$*" >> "$CODEX_CC_TRIAGE_LOCK_TRACE"
+}
+
 codex_cc_lock_mtime_epoch() {
   local path="$1" value
   value="$(stat -c '%Y' "$path" 2>/dev/null)" && [ -n "$value" ] \
@@ -67,8 +72,11 @@ codex_cc_lock_release_owned() {
   [ -f "$lock_dir/$owner_name" ] || return 0
   codex_cc_lock_assert_single_link "$lock_dir/$owner_name" || return 0
   [ "$(cat "$lock_dir/$owner_name" 2>/dev/null)" = "$expected_owner" ] || return 0
+  codex_cc_lock_trace "release-begin ${lock_dir##*/}"
   rm -f "$lock_dir/$owner_name" 2>/dev/null
+  codex_cc_lock_trace "release-owner-removed ${lock_dir##*/}"
   rmdir "$lock_dir" 2>/dev/null || true
+  codex_cc_lock_trace "release-rmdir-done ${lock_dir##*/}"
 }
 
 codex_cc_lock_guard_acquire() {

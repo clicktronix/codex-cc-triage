@@ -372,8 +372,9 @@ acquire_lock() {
   assert_directory_or_missing "$LOCK" "thread lock"
   [ -d "$LOCK" ] || die 10 "thread lock changed concurrently: $thread"
   assert_regular_or_missing "$LOCK/pid" "thread lock owner"
+  lock_is_stale "$LOCK" \
+    || die 10 "thread is active: $thread (pid $(cat "$LOCK/pid" 2>/dev/null || echo pending))"
   owner="$(cat "$LOCK/pid" 2>/dev/null || true)"
-  lock_is_stale "$LOCK" || die 10 "thread is active: $thread (pid ${owner:-pending})"
   stale="$LOCK.stale.$$"
   [ ! -e "$stale" ] && [ ! -L "$stale" ] \
     || die 7 "stale thread lock path already exists: $stale"

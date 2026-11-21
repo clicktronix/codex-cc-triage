@@ -196,7 +196,12 @@ if $READ_ONLY; then
   exit 0
 fi
 
-assert_migration_marker_safe
+# A completed migration is final, so routine calls never contend for its lock.
+if migration_complete; then
+  [ -d "$STATE_DIR" ] || { echo "migrated state directory is missing" >&2; exit 7; }
+  printf '%s\n' "$STATE_DIR"
+  exit 0
+fi
 mkdir -p "$PARENT" || exit 1
 [ ! -L "$STATE_DIR" ] || { echo "refusing symlinked thread directory" >&2; exit 7; }
 LOCK="$PARENT/migration.lock"
@@ -248,9 +253,9 @@ while :; do
     assert_lock_safe "$LOCK"
     reclaim=false
     if [ -d "$LOCK" ]; then
-      owner="$(cat "$LOCK/owner" 2>/dev/null)"
       lock_is_stale "$LOCK" && reclaim=true
       if $reclaim; then
+        owner="$(cat "$LOCK/owner" 2>/dev/null)"
         [ "$(cat "$RECLAIM_LOCK/owner" 2>/dev/null)" = "$$" ] \
           || { echo "state-dir.sh: lost migration reclaim lock" >&2; exit 7; }
         stale_lock="$LOCK.stale.$$"
@@ -302,16 +307,18 @@ if [ -d "$LEGACY_DIR" ] && [ "$LEGACY_DIR" != "$STATE_DIR" ]; then
       }
     fi
   done
-  mkdir -p "$MIGRATION_DIR" || exit 1
-  marker_tmp="$(mktemp "$MIGRATION_MARKER.tmp.XXXXXX")" || exit 1
-  if printf 'legacy_dir=%s\n' "$LEGACY_DIR" > "$marker_tmp" \
-      && mv -f "$marker_tmp" "$MIGRATION_MARKER"; then
-    :
-  else
-    rm -f "$marker_tmp" 2>/dev/null
-    echo "state-dir.sh: could not publish migration marker" >&2
-    exit 1
-  fi
+fi
+
+# Publish completion even without legacy state; a later legacy directory is ignored.
+mkdir -p "$MIGRATION_DIR" || exit 1
+marker_tmp="$(mktemp "$MIGRATION_MARKER.tmp.XXXXXX")" || exit 1
+if printf 'legacy_dir=%s\n' "$LEGACY_DIR" > "$marker_tmp" \
+    && mv -f "$marker_tmp" "$MIGRATION_MARKER"; then
+  :
+else
+  rm -f "$marker_tmp" 2>/dev/null
+  echo "state-dir.sh: could not publish migration marker" >&2
+  exit 1
 fi
 
 printf '%s\n' "$STATE_DIR"

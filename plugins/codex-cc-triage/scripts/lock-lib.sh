@@ -52,7 +52,9 @@ codex_cc_lock_is_stale() {
     *)
       [ "${#owner}" -le 12 ] || return 0
       kill -0 "$owner" 2>/dev/null && return 1
-      return 0
+      # The owner may have released normally after the sample, letting another
+      # process install a fresh generation. Only the same dead owner is stale.
+      [ "$(cat "$lock_dir/$owner_name" 2>/dev/null)" = "$owner" ]
       ;;
   esac
 }

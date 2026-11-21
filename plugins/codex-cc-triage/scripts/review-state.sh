@@ -145,10 +145,10 @@ try_reclaim_review_lock() {
     remove_owned_reclaim_lock
     return 0
   fi
-  owner="$(cat "$REVIEW_LOCK/owner" 2>/dev/null)"
   reclaim=false
   lock_is_stale "$REVIEW_LOCK" && reclaim=true
   if $reclaim; then
+    owner="$(cat "$REVIEW_LOCK/owner" 2>/dev/null)"
     [ "$(cat "$RECLAIM_LOCK/owner" 2>/dev/null)" = "$$" ] \
       || die 7 "lost review reclaim lock"
     stale_lock="$REVIEW_LOCK.stale.$$"

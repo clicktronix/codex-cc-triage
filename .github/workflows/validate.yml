@@ -15,21 +15,19 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: bash tests/run.sh
-      - name: lock trace (temporary diagnostic, to be removed)
+      - name: mkdir race probe (temporary diagnostic, to be removed)
         if: always() && runner.os == 'Linux'
         run: |
-          bash --version | head -n 1
-          found=0
-          for i in $(seq 1 60); do
-            export CODEX_CC_TRIAGE_LOCK_TRACE=/tmp/locktrace.$i
-            python3 tests/product-integrity.py ProductIntegrity.test_concurrent_state_changes_on_one_thread_have_defined_results > /tmp/lockout.$i 2>&1 || true
-            if grep -q FOREIGN "$CODEX_CC_TRIAGE_LOCK_TRACE" 2>/dev/null; then
-              found=$((found+1))
-              if [ "$found" -le 3 ]; then
-                echo "=== run $i: FOREIGN owner seen; the 45 trace lines before it"
-                n=$(grep -n FOREIGN "$CODEX_CC_TRIAGE_LOCK_TRACE" | head -n 1 | cut -d: -f1)
-                sed -n "$(( n > 45 ? n - 45 : 1 )),$(( n + 12 ))p" "$CODEX_CC_TRIAGE_LOCK_TRACE"
-              fi
-            fi
+          . /etc/os-release; echo "os: $PRETTY_NAME"
+          mkdir --version 2>&1 | head -n 2
+          ls -l "$(command -v mkdir)"
+          cd "$(mktemp -d)"
+          both=0; one=0; none=0
+          for i in $(seq 1 3000); do
+            rm -rf d a b
+            ( mkdir d 2>/dev/null && : > a ) &
+            ( mkdir d 2>/dev/null && : > b ) &
+            wait
+            if [ -e a ] && [ -e b ]; then both=$((both+1)); elif [ -e a ] || [ -e b ]; then one=$((one+1)); else none=$((none+1)); fi
           done
-          echo "runs with a foreign owner in a fresh lock directory: $found of 60"
+          echo "two simultaneous 'mkdir d': both exit 0 in $both of 3000 trials; exactly one in $one; none in $none"

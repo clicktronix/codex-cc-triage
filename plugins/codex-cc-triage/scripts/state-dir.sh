@@ -271,6 +271,9 @@ while :; do
             || { echo "state-dir.sh: refused unsafe stale lock owner" >&2; exit 7; }
           [ "$(cat "$stale_lock/owner" 2>/dev/null)" = "$owner" ] \
             || { echo "state-dir.sh: migration lock generation changed during reclaim" >&2; exit 7; }
+          modified="$(codex_cc_lock_mtime_epoch "$stale_lock")"
+          case "$modified" in ''|*[!0-9]*) age=unknown ;; *) age="$(( $(date +%s) - modified ))s" ;; esac
+          echo "state-dir.sh: took over a stale migration lock (owner '$owner', age $age)" >&2
           rm -f "$stale_lock/owner" 2>/dev/null
           rmdir "$stale_lock" 2>/dev/null || true
         fi

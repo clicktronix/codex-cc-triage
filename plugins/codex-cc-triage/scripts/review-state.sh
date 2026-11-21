@@ -163,6 +163,9 @@ try_reclaim_review_lock() {
         || die 7 "refused symlinked stale review lock owner"
       [ "$(cat "$stale_lock/owner" 2>/dev/null)" = "$owner" ] \
         || die 7 "review lock generation changed during reclaim"
+      modified="$(codex_cc_lock_mtime_epoch "$stale_lock")"
+      case "$modified" in ''|*[!0-9]*) age=unknown ;; *) age="$(( $(date +%s) - modified ))s" ;; esac
+      echo "codex-cc-triage: took over a stale review-state lock (owner '$owner', age $age)" >&2
       rm -f "$stale_lock/owner" 2>/dev/null
       rmdir "$stale_lock" 2>/dev/null || true
     fi

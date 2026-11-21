@@ -183,13 +183,12 @@ acquire_review_lock() {
     assert_review_lock_safe
     assert_reclaim_lock_safe
     if mkdir "$REVIEW_LOCK" 2>/dev/null; then
-      if ! (set -C; printf '%s\n' "$$" > "$REVIEW_LOCK/owner") 2>/dev/null \
-          || [ "$(cat "$REVIEW_LOCK/owner" 2>/dev/null)" != "$$" ]; then
-        die 7 "cannot own review-state lock"
-      fi
-      return 0
+      # A caller that finds another owner in its new directory waits like any contender.
+      (set -C; printf '%s\n' "$$" > "$REVIEW_LOCK/owner") 2>/dev/null \
+        && [ "$(cat "$REVIEW_LOCK/owner" 2>/dev/null)" = "$$" ] && return 0
+    elif try_reclaim_review_lock; then
+      continue
     fi
-    try_reclaim_review_lock && continue
     waits=$((waits + 1))
     [ "$waits" -lt 100 ] || die 10 "review-state lock is busy"
     sleep 0.05 2>/dev/null || sleep 1

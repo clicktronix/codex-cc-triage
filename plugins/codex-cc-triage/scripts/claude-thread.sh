@@ -358,7 +358,7 @@ acquire_lock() {
   if mkdir "$LOCK" 2>/dev/null; then
     if ! (set -C; printf '%s\n' "$$" > "$LOCK/pid") 2>/dev/null \
         || [ "$(cat "$LOCK/pid" 2>/dev/null)" != "$$" ]; then
-      die 7 "cannot write lock owner"
+      die 10 "thread was acquired concurrently: $thread"
     fi
     return
   fi
@@ -391,7 +391,7 @@ acquire_lock() {
   mkdir "$LOCK" 2>/dev/null || die 10 "thread was acquired concurrently: $thread"
   if ! (set -C; printf '%s\n' "$$" > "$LOCK/pid") 2>/dev/null \
       || [ "$(cat "$LOCK/pid" 2>/dev/null)" != "$$" ]; then
-    die 7 "cannot write lock owner"
+    die 10 "thread was acquired concurrently: $thread"
   fi
   codex_cc_lock_release_owned "$LOCK_RECLAIM" pid "$$"
 }

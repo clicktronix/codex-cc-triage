@@ -122,6 +122,51 @@ class LockRaces(unittest.TestCase):
         self.assert_reclaim_respects_a_new_generation(
             argv, self.repo / ".git/codex-cc-triage/migration.lock")
 
+    def plant_owner_after_mkdir(self, lock, owner="owner"):
+        """mkdir shim: right after creating the lock directory, another live caller owns it."""
+        holder = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(holder.wait); self.addCleanup(holder.kill)
+        shim = self.tmp / "mkdir-bin"; shim.mkdir()
+        (shim / "mkdir").write_text(
+            '#!/bin/sh\n/bin/mkdir "$@" || exit $?\n'
+            f'case "$1" in */{lock}) if [ ! -e "$SHIM_DIR/planted" ]; then\n'
+            f'  printf "%s\\n" {holder.pid} > "$1/{owner}"; : > "$SHIM_DIR/planted"; fi ;; esac\n')
+        (shim / "mkdir").chmod(0o755)
+        self.env["PATH"] = f"{shim}:{self.env['PATH']}"
+
+    def assert_lost_lock_waits(self, argv, lock_dir):
+        self.plant_owner_after_mkdir(lock_dir.name)
+        worker = subprocess.Popen(argv, cwd=self.repo, env=self.env, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: worker.poll() is None and worker.kill())
+        self.wait_for(lambda: (self.signals / "planted").exists() or worker.poll() is not None,
+                      "the lock directory to be created")
+        time.sleep(0.5)
+        self.assertIsNone(worker.poll(), "a caller that lost a fresh lock stopped instead of waiting")
+        (lock_dir / "owner").unlink(); lock_dir.rmdir()
+        _, error = worker.communicate(timeout=20)
+        self.assertEqual(worker.returncode, 0, error)
+
+    def test_losing_a_fresh_migration_lock_waits(self):
+        self.assert_lost_lock_waits(["bash", str(SCRIPTS / "state-dir.sh")],
+                                    self.repo / ".git/codex-cc-triage/migration.lock")
+
+    def test_losing_a_fresh_review_lock_waits(self):
+        state = self.tmp / "state"; state.mkdir()
+        self.env["CODEX_CC_TRIAGE_STATE_DIR"] = str(state)
+        self.assert_lost_lock_waits(["bash", str(SCRIPTS / "review-state.sh"), "advisory-check", "t"],
+                                    state / "t.review-lock")
+
+    def test_losing_a_fresh_thread_lock_reports_a_busy_thread(self):
+        state = self.tmp / "state"; state.mkdir()
+        self.env["CODEX_CC_TRIAGE_STATE_DIR"] = str(state)
+        self.plant_owner_after_mkdir("t.active", "pid")
+        result = subprocess.run(["bash", str(SCRIPTS / "claude-thread.sh"), "dispatch", "ask", "t"],
+                                cwd=self.repo, env=self.env, input="question", capture_output=True,
+                                text=True, timeout=30)
+        self.assertEqual(result.returncode, 10, result.stderr)
+        self.assertIn("acquired concurrently", result.stderr)
+
     def test_completed_state_resolution_skips_a_busy_migration_lock(self):
         helper = ["bash", str(SCRIPTS / "state-dir.sh")]
         first = subprocess.run(helper, cwd=self.repo, env=self.env, capture_output=True,

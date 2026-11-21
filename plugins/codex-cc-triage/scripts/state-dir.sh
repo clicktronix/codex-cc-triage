@@ -240,17 +240,13 @@ while :; do
   assert_lock_safe "$LOCK"
   assert_lock_safe "$RECLAIM_LOCK"
   if mkdir "$LOCK" 2>/dev/null; then
-    step="write"
-    if (set -C; printf '%s\n' "$$" > "$LOCK/owner") 2>/dev/null; then step="read-back"; fi
-    seen="$(cat "$LOCK/owner" 2>/dev/null)"
-    if [ "$step" = write ] || [ "$seen" != "$$" ]; then
-      state=missing; [ ! -d "$LOCK" ] || state=present
-      echo "state-dir.sh: cannot own migration lock: $step failed, lock $state, owner '${seen}', pid $$" >&2
-      exit 7
+    # Only the caller that reads back its own PID owns the lock. One that finds
+    # another owner in the directory it just created waits like any contender.
+    if (set -C; printf '%s\n' "$$" > "$LOCK/owner") 2>/dev/null \
+        && [ "$(cat "$LOCK/owner" 2>/dev/null)" = "$$" ]; then
+      break
     fi
-    break
-  fi
-  if acquire_reclaim_lock; then
+  elif acquire_reclaim_lock; then
     # Re-sample only while holding the separate reclamation guard. This keeps
     # a contender from acting on the generation another process replaced.
     assert_lock_safe "$LOCK"

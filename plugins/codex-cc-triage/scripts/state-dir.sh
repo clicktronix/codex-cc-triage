@@ -240,9 +240,12 @@ while :; do
   assert_lock_safe "$LOCK"
   assert_lock_safe "$RECLAIM_LOCK"
   if mkdir "$LOCK" 2>/dev/null; then
-    if ! (set -C; printf '%s\n' "$$" > "$LOCK/owner") 2>/dev/null \
-        || [ "$(cat "$LOCK/owner" 2>/dev/null)" != "$$" ]; then
-      echo "state-dir.sh: cannot own migration lock" >&2
+    step="write"
+    if (set -C; printf '%s\n' "$$" > "$LOCK/owner") 2>/dev/null; then step="read-back"; fi
+    seen="$(cat "$LOCK/owner" 2>/dev/null)"
+    if [ "$step" = write ] || [ "$seen" != "$$" ]; then
+      state=missing; [ ! -d "$LOCK" ] || state=present
+      echo "state-dir.sh: cannot own migration lock: $step failed, lock $state, owner '${seen}', pid $$" >&2
       exit 7
     fi
     break

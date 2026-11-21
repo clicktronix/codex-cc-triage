@@ -210,12 +210,12 @@ check_runtime() {
 
   capability_file="$STATE_DIR/.cli-capabilities"
   assert_regular_or_missing "$capability_file" "CLI capability cache"
-  capability_key="$("$PYTHON_BIN" - "$CLAUDE_BIN" "$EFFORT" "$SCRIPT_DIR/claude-thread.sh" <<'PYKEY'
+  capability_key="$("$PYTHON_BIN" - "$CLAUDE_BIN" "$EFFORT" "$BUDGET" "$SCRIPT_DIR/claude-thread.sh" <<'PYKEY'
 import hashlib, pathlib, shutil, sys
 binary = pathlib.Path(shutil.which(sys.argv[1])).resolve()
 stat = binary.stat()
-identity = (str(binary), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, bool(sys.argv[2]))
-print(hashlib.sha256(repr(identity).encode() + pathlib.Path(sys.argv[3]).read_bytes()).hexdigest())
+identity = (str(binary), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, bool(sys.argv[2]), bool(sys.argv[3]))
+print(hashlib.sha256(repr(identity).encode() + pathlib.Path(sys.argv[4]).read_bytes()).hexdigest())
 PYKEY
 )" || die 9 "cannot identify Claude executable"
   if [ "${CODEX_CC_TRIAGE_REFRESH_CAPABILITIES:-0}" = 1 ] \
@@ -253,10 +253,9 @@ for flag in sys.argv[1:]:
     --disable-slash-commands \
     --no-chrome \
     --model \
-    --max-budget-usd \
     --output-format \
     --resume \
-    --name ${EFFORT:+--effort} ${persistence_flag:+$persistence_flag})" || die 9 "cannot validate Claude Code CLI capabilities"
+    --name ${EFFORT:+--effort} ${BUDGET:+--max-budget-usd} ${persistence_flag:+$persistence_flag})" || die 9 "cannot validate Claude Code CLI capabilities"
   [ -z "$missing_flag" ] \
     || die 9 "Claude Code CLI does not support required flag: $missing_flag"
 
@@ -659,9 +658,6 @@ run_claude() {
   local mode="$1"
   local thread="$2"
   local prompt="$3"
-  if [ -z "$BUDGET" ]; then
-    case "$mode" in review) BUDGET=5.00 ;; *) BUDGET=1.00 ;; esac
-  fi
   local target_ref="$4"
   local id_file="$STATE_DIR/$thread.id"
   local mode_file="$STATE_DIR/$thread.mode"
@@ -815,9 +811,9 @@ $prompt"
     --disable-slash-commands \
     --no-chrome \
     --model "$MODEL" \
-    --max-budget-usd "$BUDGET" \
     --output-format json
   [ -z "$EFFORT" ] || set -- "$@" --effort "$EFFORT"
+  [ -z "$BUDGET" ] || set -- "$@" --max-budget-usd "$BUDGET"
   if $ONESHOT; then
     set -- "$@" --no-session-persistence
   elif [ -n "$existing_id" ]; then
@@ -867,7 +863,7 @@ $prompt"
     --meta-output "$PARSED_META"
   parse_rc=$?
   if [ "$parse_rc" -eq 3 ]; then
-    $ONESHOT && die 3 "ephemeral Claude call reached budget limit (\$$BUDGET), review incomplete"
+    $ONESHOT && die 3 "ephemeral Claude call reached budget limit${BUDGET:+ (\$$BUDGET)}, review incomplete"
     persist_failure "$thread" "$mode"
     rm -f "$STATE_DIR/$thread.last-result" "$STATE_DIR/$thread.last-fingerprint" \
       "$STATE_DIR/$thread.last-base" || die 7 "cannot clear incomplete review artifacts"
@@ -881,7 +877,7 @@ $prompt"
     atomic_write "$id_file" "$returned_id"
     atomic_write "$STATE_DIR/$thread.last-prompt" "$prompt"
     atomic_write "$STATE_DIR/$thread.failed" "budget_exhausted"
-    die 3 "Claude reached budget limit (\$$BUDGET); session '$returned_id' and pinned base retained, review incomplete. Continue this thread only within an authorized budget; inspect $STATE_DIR/$thread.last-error.*"
+    die 3 "Claude reached budget limit${BUDGET:+ (\$$BUDGET)}; session '$returned_id' and pinned base retained, review incomplete. Continue on this thread; inspect $STATE_DIR/$thread.last-error.*"
   fi
   if [ "$claude_rc" -ne 0 ]; then
     $ONESHOT && die 3 "ephemeral Claude call exited $claude_rc"

@@ -20,7 +20,7 @@
   "interface": {
     "displayName": "Codex CC Triage",
     "shortDescription": "Read-only Claude opinions",
-    "longDescription": "Ask Claude bounded questions, assess sources, debate designs, review diffs and revisit findings on the same thread. Required review ties the result to a clean Git candidate and its authorized call budget.",
+    "longDescription": "Ask Claude bounded questions, assess sources, debate designs, review diffs and revisit findings on the same thread. Required review ties the result to a clean Git candidate within a round limit.",
     "developerName": "Clicktronix",
     "category": "Developer Tools",
     "capabilities": [

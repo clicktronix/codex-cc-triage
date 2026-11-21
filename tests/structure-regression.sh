@@ -89,3 +89,31 @@ if CODEX_CC_TRIAGE_REPO_ROOT="$MUTANT" \
   exit 1
 fi
 echo "PASS disabled validation job mutation is rejected"
+
+ownership="$ROOT/plugins/codex-cc-triage/skills/references/ownership.md"
+for obligation in \
+  'The Claude subprocess requires outbound network access.' \
+  'never recommend disabling the sandbox globally' \
+  'do not seed the findings you suspect and do not cap how many Claude may report' \
+  'Do not paste secrets or unrelated proprietary context.' \
+  "starts on the user's request or when the owning workflow's review step requires it, because it sends repository content to another provider"; do
+  grep -qF -- "$obligation" "$ownership" \
+    || { echo "FAIL ownership.md lost an obligation: $obligation" >&2; exit 1; }
+done
+echo "PASS ownership keeps the network, unbiased-request, secrets and provider rules"
+
+forbid() { # description, then grep arguments; any match or a grep error fails
+  local description="$1" rc
+  shift
+  grep "$@"
+  rc=$?
+  [ "$rc" -eq 1 ] && return 0
+  [ "$rc" -eq 0 ] && echo "FAIL $description" >&2
+  exit 1
+}
+shipped=("$ROOT/README.md" "$ROOT/plugins/codex-cc-triage/skills" "$ROOT/plugins/codex-cc-triage/.codex-plugin")
+forbid "payment wording in shipped text" -rnwi -e paid -e budget -e grant -e grants -e granted "${shipped[@]}"
+forbid "removed accounting flags or undefined recipe variables in shipped text" -rnF \
+  -e 'State the ceiling' -e '--grant' -e '--rounds' -e '--integration' -e NO_FINDINGS \
+  -e '$plugin_root' -e '$prompt_file' "${shipped[@]}"
+echo "PASS shipped text counts rounds and uses runnable recipes"

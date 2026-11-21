@@ -117,3 +117,11 @@ forbid "removed accounting flags or undefined recipe variables in shipped text" 
   -e 'State the ceiling' -e '--grant' -e '--rounds' -e '--integration' -e NO_FINDINGS \
   -e '$plugin_root' -e '$prompt_file' "${shipped[@]}"
 echo "PASS shipped text counts rounds and uses runnable recipes"
+
+# This plugin knows no other plugin; only the archive keeps historical mentions.
+foreign=(-rnE --exclude-dir=.git --exclude-dir=ARCHIVE --exclude-dir=__pycache__ --exclude=structure-regression.sh
+  'cc-tuner|codex-tuner|cc-codex-triage|CC_TUNER|CODEX_TUNER|CC_CODEX_|heavy\.sh|merge\.sh|codex-thread')
+forbid "another plugin is named outside docs/ARCHIVE" "${foreign[@]}" "$ROOT"
+printf 'Pair with cc-tuner.\n' >> "$MUTANT/plugins/codex-cc-triage/skills/references/ownership.md"
+grep -q "${foreign[@]}" "$MUTANT" || { echo "FAIL a planted plugin name was not detected" >&2; exit 1; }
+echo "PASS no other plugin is named outside docs/ARCHIVE"

@@ -62,6 +62,33 @@ Git thread state lives under `<git-common-dir>/codex-cc-triage/threads/` so name
 
 Run `bash tests/run.sh` for the offline regression suite.
 
+## Contract for callers
+
+Another tool can drive a required review through `plugins/codex-cc-triage/scripts/review-state.sh` without this plugin knowing it. These verbs, their exit codes and the marker line are a public contract.
+
+| Verb | Result |
+| --- | --- |
+| `begin <thread> --base <ref> --spec <path> [--cap 1..7]` | Claims a round: `PENDING head=<sha> tree=<sha> fingerprint=<sha256> claim=<token> attempt=<n>/<cap>` |
+| `header <thread>` | The four scope lines that open the review request |
+| `record <thread> foreground <claim>` | Records the dispatched result; the marker on approval |
+| `abort <thread> dispatch-failure\|timeout\|tool-failure <claim>` | Returns a round that produced no result; exits 10 with `ABORTED` |
+| `stop <thread> cap\|divergence <claim>` | Ends a pending round without approval; exits 10 |
+| `check <thread>` | The marker, while the approval covers the clean `HEAD` |
+| `renew <thread> --by <who>` | After `CAP_REACHED`, resets the round count on the same thread |
+| `mode <thread>` | `required` or `advisory` |
+
+The request goes to `scripts/claude-thread.sh dispatch review <thread> <base>` on stdin and must start with the `header` lines.
+
+Exit codes: 0 for `begin`, `header`, `mode`, `renew`, and `record` or `check` with the marker; 2 usage; 7 state or runtime failure, with a pending claim kept for retry; 10 refused by the lifecycle (`PENDING`, `REQUEST_CHANGES`, `NO_DECISION`, `CAP_REACHED`, `RENEW_REFUSED`, `NO_APPROVAL`, `INVALID_CLAIM_STATE` and similar, named on stderr); 11 `STALE`; 13 the candidate is not clean or the spec is untracked or a symlink; 14 the request does not start with the `header` lines.
+
+The approval marker is one line:
+
+```text
+CODEX_CC_REQUIRED_REVIEW APPROVE thread=<thread> head=<sha> tree=<sha> fingerprint=<sha256> base_sha=<sha> spec_path=<path>
+```
+
+The first seven fields are separated by single spaces. `spec_path=` comes last and its value is the rest of the line: it may contain spaces and Unicode, so a caller reads it to the end of the line instead of splitting on whitespace.
+
 ## License
 
 MIT

@@ -15,3 +15,21 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: bash tests/run.sh
+      - name: lock trace (temporary diagnostic, to be removed)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y strace >/dev/null 2>&1
+          mkdir -p /tmp/locktrace
+          for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            strace -f --seccomp-bpf -tt -s 200 \
+              -e trace=mkdir,mkdirat,rmdir,rename,renameat,renameat2,unlink,unlinkat,execve,clone,clone3,fork,vfork \
+              -o /tmp/locktrace/st.$i \
+              python3 tests/product-integrity.py ProductIntegrity.test_concurrent_state_changes_on_one_thread_have_defined_results \
+              > /tmp/locktrace/out.$i 2>&1 || true
+            echo "run $i: $(tail -n 1 /tmp/locktrace/out.$i) | successful mkdir of migration.lock: $(grep -cE 'mkdir(at)?\(.*migration\.lock", [0-9]+\) = 0' /tmp/locktrace/st.$i)"
+          done
+      - uses: actions/upload-artifact@v7
+        if: runner.os == 'Linux'
+        with:
+          name: locktrace
+          path: /tmp/locktrace

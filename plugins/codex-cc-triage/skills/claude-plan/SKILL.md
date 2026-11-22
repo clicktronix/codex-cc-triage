@@ -1,48 +1,16 @@
 ---
 name: claude-plan
-description: Use when an authorized owning workflow explicitly invokes this skill, or the user explicitly asks Codex to get a Claude Code second opinion, critique, or adversarial stress-test of an implementation plan or technical design.
+description: Stress-test a proposed implementation plan or architecture with Claude when the task requests or authorizes an independent planning opinion.
 ---
 
 # Claude Plan
 
-Use Claude Code as a read-only second-opinion planner. Codex remains the judge: validate every
-objection against the repository before changing the plan.
+Read the plan, constraints, existing evidence and relevant repository rules. Follow the [ownership and dispatch rules](../references/ownership.md). Send the decisions that require scrutiny, affected boundaries and what would falsify the approach.
 
-Follow [ownership.md](../references/ownership.md).
+```bash
+bash "<plugin-root>/scripts/claude-thread.sh" dispatch plan "<thread>" <<'CODEX_CC_TRIAGE_PROMPT'
+<plan, decisions to scrutinize and what would falsify them>
+CODEX_CC_TRIAGE_PROMPT
+```
 
-1. Read the relevant plan, task, repository instructions, and architecture boundaries yourself.
-2. Resolve `<plugin-root>` as two directories above this skill's directory (the parent of
-   `skills/`), not as the `skills/` directory itself.
-3. Generate the thread name with the driver. On a feature branch, omit the source to use that
-   branch; on `main`, `master`, or detached HEAD, pass a concise task label:
-
-   ```bash
-   thread="$(bash "<plugin-root>/scripts/claude-thread.sh" name plan)"
-   # On main, master, or detached HEAD:
-   thread="$(bash "<plugin-root>/scripts/claude-thread.sh" name plan "<task-label>")"
-   ```
-
-   Never use a shared thread across unrelated tasks. Reuse the result only for another round on
-   the same plan.
-4. Build a concise prompt containing the plan path or proposal, important constraints, unresolved
-   decisions, and the exact stress-test requested. Do not paste secrets or unrelated proprietary
-   context.
-5. Send it on stdin without shell interpolation:
-
-   ```bash
-   bash "<plugin-root>/scripts/claude-thread.sh" dispatch plan "$thread" <<'CODEX_CC_TRIAGE_PROMPT'
-   <prompt text>
-   CODEX_CC_TRIAGE_PROMPT
-   ```
-
-6. Report the thread name. Check Claude's findings against live code and current primary docs;
-   accept, reject, or qualify each material objection with evidence.
-7. After plan edits, invoke the same thread for a fresh re-evaluation. Do not start a new session
-   merely to seek an easier verdict.
-
-If the driver exits non-zero, report its exact diagnostic. Do not silently replace a failed resume
-with a new thread.
-
-The Claude subprocess requires outbound network access. If Codex blocks it, request approval for
-this bridge command or explain the narrow `workspace-write` network setting; never recommend
-disabling sandboxing globally.
+Validate each objection against code or current primary sources. When a revised plan needs another assessment, reuse the thread. Finish on approval, optional comments only, or the round limit: five rounds for a new iterative plan, fewer when the owner sets fewer. `--once` and `--oneshot` both finish after the first response. Report the recommendation, remaining uncertainty and, for persistent sessions, the thread name.

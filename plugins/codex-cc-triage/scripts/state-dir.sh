@@ -20,10 +20,9 @@ case "${1:-}" in
   *) echo "usage: state-dir.sh [--read-only]" >&2; exit 1 ;;
 esac
 
-if ! ROOT="$(git -C "${CODEX_CC_TRIAGE_PROJECT_DIR:-$PWD}" rev-parse --show-toplevel 2>/dev/null)" || [ -z "$ROOT" ]; then
-  echo "not inside a git repository" >&2
-  exit 7
-fi
+ROOT="$(cd "${CODEX_CC_TRIAGE_PROJECT_DIR:-$PWD}" 2>/dev/null && pwd -P)" || { echo "cannot enter project directory" >&2; exit 7; }
+GIT_ROOT="$(git -C "$ROOT" rev-parse --show-toplevel 2>/dev/null)" || GIT_ROOT=""
+[ -z "$GIT_ROOT" ] || ROOT="$GIT_ROOT"
 cd "$ROOT" || exit 7
 
 assert_single_link() {
@@ -75,6 +74,21 @@ if [ -n "${CODEX_CC_TRIAGE_STATE_DIR:-}" ]; then
         || { rm -f "$IGNORE_TMP" 2>/dev/null; exit 7; }
     fi
   fi
+  printf '%s\n' "$STATE_DIR"
+  exit 0
+fi
+
+if [ -z "$GIT_ROOT" ]; then
+  state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
+  case "$state_home" in /*) ;; *) echo "XDG_STATE_HOME must be absolute" >&2; exit 7 ;; esac
+  context_key="$(printf '%s' "$ROOT" | git hash-object --stdin)" || exit 7
+  parent="$state_home/codex-cc-triage"
+  contexts="$parent/contexts"
+  STATE_DIR="$contexts/$context_key"
+  for path in "$parent" "$contexts" "$STATE_DIR"; do
+    assert_directory_or_missing "$path" "standalone state directory"
+  done
+  $READ_ONLY || mkdir -p "$STATE_DIR" || exit 7
   printf '%s\n' "$STATE_DIR"
   exit 0
 fi
@@ -182,7 +196,12 @@ if $READ_ONLY; then
   exit 0
 fi
 
-assert_migration_marker_safe
+# A completed migration is final, so routine calls never contend for its lock.
+if migration_complete; then
+  [ -d "$STATE_DIR" ] || { echo "migrated state directory is missing" >&2; exit 7; }
+  printf '%s\n' "$STATE_DIR"
+  exit 0
+fi
 mkdir -p "$PARENT" || exit 1
 [ ! -L "$STATE_DIR" ] || { echo "refusing symlinked thread directory" >&2; exit 7; }
 LOCK="$PARENT/migration.lock"
@@ -221,22 +240,21 @@ while :; do
   assert_lock_safe "$LOCK"
   assert_lock_safe "$RECLAIM_LOCK"
   if mkdir "$LOCK" 2>/dev/null; then
-    if ! (set -C; printf '%s\n' "$$" > "$LOCK/owner") 2>/dev/null \
-        || [ "$(cat "$LOCK/owner" 2>/dev/null)" != "$$" ]; then
-      echo "state-dir.sh: cannot own migration lock" >&2
-      exit 7
+    # Only the caller that reads back its own PID owns the lock. One that finds
+    # another owner in the directory it just created waits like any contender.
+    if (set -C; printf '%s\n' "$$" > "$LOCK/owner") 2>/dev/null \
+        && [ "$(cat "$LOCK/owner" 2>/dev/null)" = "$$" ]; then
+      break
     fi
-    break
-  fi
-  if acquire_reclaim_lock; then
+  elif acquire_reclaim_lock; then
     # Re-sample only while holding the separate reclamation guard. This keeps
     # a contender from acting on the generation another process replaced.
     assert_lock_safe "$LOCK"
     reclaim=false
     if [ -d "$LOCK" ]; then
-      owner="$(cat "$LOCK/owner" 2>/dev/null)"
       lock_is_stale "$LOCK" && reclaim=true
       if $reclaim; then
+        owner="$(cat "$LOCK/owner" 2>/dev/null)"
         [ "$(cat "$RECLAIM_LOCK/owner" 2>/dev/null)" = "$$" ] \
           || { echo "state-dir.sh: lost migration reclaim lock" >&2; exit 7; }
         stale_lock="$LOCK.stale.$$"
@@ -249,6 +267,9 @@ while :; do
             || { echo "state-dir.sh: refused unsafe stale lock owner" >&2; exit 7; }
           [ "$(cat "$stale_lock/owner" 2>/dev/null)" = "$owner" ] \
             || { echo "state-dir.sh: migration lock generation changed during reclaim" >&2; exit 7; }
+          modified="$(codex_cc_lock_mtime_epoch "$stale_lock")"
+          case "$modified" in ''|*[!0-9]*) age=unknown ;; *) age="$(( $(date +%s) - modified ))s" ;; esac
+          echo "state-dir.sh: took over a stale migration lock (owner '$owner', age $age)" >&2
           rm -f "$stale_lock/owner" 2>/dev/null
           rmdir "$stale_lock" 2>/dev/null || true
         fi
@@ -288,16 +309,18 @@ if [ -d "$LEGACY_DIR" ] && [ "$LEGACY_DIR" != "$STATE_DIR" ]; then
       }
     fi
   done
-  mkdir -p "$MIGRATION_DIR" || exit 1
-  marker_tmp="$(mktemp "$MIGRATION_MARKER.tmp.XXXXXX")" || exit 1
-  if printf 'legacy_dir=%s\n' "$LEGACY_DIR" > "$marker_tmp" \
-      && mv -f "$marker_tmp" "$MIGRATION_MARKER"; then
-    :
-  else
-    rm -f "$marker_tmp" 2>/dev/null
-    echo "state-dir.sh: could not publish migration marker" >&2
-    exit 1
-  fi
+fi
+
+# Publish completion even without legacy state; a later legacy directory is ignored.
+mkdir -p "$MIGRATION_DIR" || exit 1
+marker_tmp="$(mktemp "$MIGRATION_MARKER.tmp.XXXXXX")" || exit 1
+if printf 'legacy_dir=%s\n' "$LEGACY_DIR" > "$marker_tmp" \
+    && mv -f "$marker_tmp" "$MIGRATION_MARKER"; then
+  :
+else
+  rm -f "$marker_tmp" 2>/dev/null
+  echo "state-dir.sh: could not publish migration marker" >&2
+  exit 1
 fi
 
 printf '%s\n' "$STATE_DIR"

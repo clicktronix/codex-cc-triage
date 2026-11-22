@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 # Shared generation-safe directory-lock primitives for codex-cc-triage scripts.
+#
+# The lock is the owner file, created exclusively by the shell and read back; the directory only
+# holds it. `mkdir` is not the test-and-set: uutils coreutils 0.10 (Ubuntu 26.04) exits 0 for both
+# of two racing calls on one path, so a caller that created the directory may find another owner in
+# it and is then an ordinary contender.
 
 codex_cc_lock_link_count() {
   local path="$1" count
@@ -52,7 +57,9 @@ codex_cc_lock_is_stale() {
     *)
       [ "${#owner}" -le 12 ] || return 0
       kill -0 "$owner" 2>/dev/null && return 1
-      return 0
+      # The owner may have released normally after the sample, letting another
+      # process install a fresh generation. Only the same dead owner is stale.
+      [ "$(cat "$lock_dir/$owner_name" 2>/dev/null)" = "$owner" ]
       ;;
   esac
 }

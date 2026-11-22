@@ -4,4 +4,4 @@ interface:
   default_prompt: "Use $codex-cc-triage:claude-second-opinion to get a second opinion on this decision."
 
 policy:
-  allow_implicit_invocation: false
+  allow_implicit_invocation: true

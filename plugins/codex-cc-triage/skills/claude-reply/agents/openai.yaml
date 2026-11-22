@@ -4,4 +4,4 @@ interface:
   default_prompt: "Use $codex-cc-triage:claude-reply to continue this Claude thread."
 
 policy:
-  allow_implicit_invocation: false
+  allow_implicit_invocation: true

@@ -1,36 +1,20 @@
 ---
 name: claude-reply
-description: Use when an authorized owning workflow explicitly invokes this skill, or the user explicitly asks Codex to continue, reply to, or re-evaluate an existing codex-cc-triage Claude thread by name.
+description: Continue an existing Claude opinion, plan or review when the current task authorizes the follow-up, including after a technical failure or a renewal.
 ---
 
 # Claude Reply
 
-Continue an existing Claude session without changing its plan/review role or review base.
+Follow the [ownership and dispatch rules](../references/ownership.md).
 
-Follow [ownership.md](../references/ownership.md).
+1. Pass the explicit name, otherwise the thread known from this conversation, to `claude-thread.sh resolve "<name>"`. With neither, call `claude-thread.sh resolve`. A single eligible thread is selected automatically. Exit 8 lists an ambiguity; ask once which to use. Exit 6 identifies a missing target. Preserve an explicitly requested name.
+2. In a Git checkout run `review-state.sh mode "<thread>"`. For `required`, read the saved contract, reconcile any pending claim, and follow [required review](../claude-review/references/required-review.md). A renewed required review continues on this thread. Standalone conversations are advisory.
+3. For an advisory thread, answer the question or provide the relevant result of a delegated check. Send the follow-up with its original role and pinned base:
 
-1. Require the exact thread name shown by a previous call or by
-   `$codex-cc-triage:claude-thread status`.
-2. Resolve `<plugin-root>` as two directories above this skill's directory (the parent of
-   `skills/`), not as the `skills/` directory itself.
-3. If this thread has a `.candidate`, read its pinned base/spec/cap and follow
-   [required-review.md](../claude-review/references/required-review.md) with the follow-up
-   in a fresh claim. Reconcile a pending attempt first. Ordinary replies revoke earlier
-   approval and cannot supply a new delivery gate. For advisory threads, send on stdin:
+```bash
+bash "<plugin-root>/scripts/claude-thread.sh" reply "<thread>" <<'CODEX_CC_TRIAGE_PROMPT'
+<follow-up>
+CODEX_CC_TRIAGE_PROMPT
+```
 
-   ```bash
-   bash "<plugin-root>/scripts/claude-thread.sh" reply "<thread>" <<'CODEX_CC_TRIAGE_PROMPT'
-   <prompt text>
-   CODEX_CC_TRIAGE_PROMPT
-   ```
-
-4. For review threads, the driver regenerates the complete current diff before resuming. Ask for a
-   check of affected invariants and regressions after fixes, and complete coverage before final approval.
-5. Validate the response independently. Do not treat a confident verdict as proof.
-
-Missing, malformed, or mode-corrupt threads are hard failures. Never fall back to a new session
-without telling the user.
-
-The Claude subprocess requires outbound network access. If Codex blocks it, request approval for
-this bridge command or explain the narrow `workspace-write` network setting; never recommend
-disabling sandboxing globally.
+4. Validate the response and report what changed. Use `claude-thread.sh status "<thread>"` to diagnose a failed resume.

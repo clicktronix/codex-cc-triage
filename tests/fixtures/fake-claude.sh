@@ -22,6 +22,7 @@ if [ "${1:-}" = "--help" ]; then
     --max-budget-usd \
     --output-format \
     --resume \
+    --no-session-persistence \
     --name; do
     [ "$flag" = "${FAKE_CLAUDE_MISSING_FLAG:-}" ] || printf '%s\n' "$flag"
   done

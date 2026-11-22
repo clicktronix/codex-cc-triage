@@ -63,21 +63,32 @@ export CODEX_CC_TRIAGE_STATE_DIR="$REPO/$STATE_REL"
 EXCLUDE_BEFORE="$(cat "$REPO/.git/info/exclude" 2>/dev/null || true)"
 MAIN_BASE="$(git -C "$REPO" rev-parse main)"
 
-# No paid calls: exercise mode defaults and explicit authorization overrides.
+# Without CODEX_CC_TRIAGE_MAX_BUDGET_USD the bridge sets no dollar ceiling.
 for mode in ask plan review; do
   : > "$ARGS_LOG"
   BRIDGE_ARGS=(dispatch "$mode" "default-$mode" main)
-  output="$(run_bridge "Default budget" env -u CODEX_CC_TRIAGE_MAX_BUDGET_USD 2>&1)"
+  output="$(run_bridge "No ceiling" env -u CODEX_CC_TRIAGE_MAX_BUDGET_USD 2>&1)"
   rc=$?
-  expected=1.00
-  [ "$mode" != review ] || expected=5.00
-  actual="$(awk '/^--max-budget-usd$/ {getline; print; exit}' "$ARGS_LOG")"
-  if [ "$rc" -eq 0 ] && [ "$actual" = "$expected" ]; then
-    pass "$mode uses its default budget"
+  if [ "$rc" -eq 0 ] && grep -qx -- -p "$ARGS_LOG" && ! grep -qx -- --max-budget-usd "$ARGS_LOG"; then
+    pass "$mode passes no dollar ceiling unless one is set"
   else
-    fail "$mode default budget (rc=$rc, budget=$actual, output=$output)"
+    fail "$mode default ceiling (rc=$rc, output=$output)"
   fi
 done
+
+BRIDGE_ARGS=(dispatch ask ceiling-capability main)
+output="$(run_bridge "Unset ceiling" env -u CODEX_CC_TRIAGE_MAX_BUDGET_USD \
+  -u CODEX_CC_TRIAGE_REFRESH_CAPABILITIES FAKE_CLAUDE_MISSING_FLAG=--max-budget-usd 2>&1)"
+unset_rc=$?
+output="$(run_bridge "Set ceiling" env -u CODEX_CC_TRIAGE_REFRESH_CAPABILITIES \
+  FAKE_CLAUDE_MISSING_FLAG=--max-budget-usd 2>&1)"
+set_rc=$?
+if [ "$unset_rc" -eq 0 ] && [ "$set_rc" -eq 9 ] \
+    && printf '%s' "$output" | grep -q 'required flag: --max-budget-usd'; then
+  pass "the ceiling flag is capability-checked only when set, past a cached unset run"
+else
+  fail "ceiling capability check (unset=$unset_rc set=$set_rc, output=$output)"
+fi
 
 BRIDGE_ARGS=(dispatch review review-budget main)
 : > "$ARGS_LOG"
